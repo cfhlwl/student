@@ -7,7 +7,7 @@ class UploadGateMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if request.path_info.rstrip("/") == "/submit" and not AppSetting.get_bool("public_upload_open", True):
+        if (request.path_info.rstrip("/") == "/submit" or request.path_info.startswith("/submit/upload/")) and not AppSetting.get_bool("public_upload_open", True):
             return HttpResponse("公开上传已关闭，请联系管理员。", status=403, content_type="text/plain; charset=utf-8")
         return self.get_response(request)
 

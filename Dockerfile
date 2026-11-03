@@ -5,5 +5,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p /app/data /app/media /app/staticfiles
-CMD ["sh", "-c", "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120"]
+CMD ["sh", "-c", "python manage.py migrate && python manage.py collectstatic --noinput && mkdir -p \"${EXPORT_TEMP_DIR:-/app/data/exports}\" && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --timeout 300"]
 

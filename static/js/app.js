@@ -21,7 +21,68 @@ document.addEventListener('DOMContentLoaded', function () {
   const progress = document.getElementById('upload-progress');
   const submitButton = document.getElementById('submit-button');
   if (submitForm && progress && submitButton) {
-    submitForm.addEventListener('submit', function () {
+    async function uploadInBatches() {
+      const photoInput = submitForm.querySelector('[name=photos]');
+      const rosterInput = submitForm.querySelector('[name=roster]');
+      const documentInput = submitForm.querySelector('[name=documents]');
+      const batchSize = Number(submitForm.dataset.photoBatchSize || 20);
+      const batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024;
+      const csrf = submitForm.querySelector('[name=csrfmiddlewaretoken]').value;
+      const files = Array.from(photoInput?.files || []);
+      let state = window.__studentUploadState;
+      const jsonRequest = async function (url, data) {
+        const response = await fetch(url, {method: 'POST', headers: {'X-CSRFToken': csrf}, body: data});
+        const body = await response.json().catch(function () { return {}; });
+        if (!response.ok) throw new Error(body.error || '上传失败，请重试');
+        return body;
+      };
+      if (!state) {
+        const startData = new FormData();
+        startData.append('roster', rosterInput.files[0], rosterInput.files[0].name);
+        startData.append('expected_photo_count', String(files.length));
+        startData.append('note', submitForm.querySelector('[name=note]')?.value || '');
+        Array.from(documentInput?.files || []).forEach(function (file) { startData.append('documents', file, file.name); });
+        const started = await jsonRequest(submitForm.dataset.uploadStart, startData);
+        state = window.__studentUploadState = {id: started.upload_id, token: started.upload_token, nextIndex: 0, batchNo: 0};
+      }
+      submitButton.disabled = true;
+      progress.style.display = 'block';
+      const total = files.length || 1;
+      while (state.nextIndex < files.length) {
+        const start = state.nextIndex;
+        let end = start;
+        let size = 0;
+        while (end < files.length && end < start + batchSize && (end === start || size + files[end].size <= batchBytes)) {
+          size += files[end].size;
+          end += 1;
+        }
+        const batchData = new FormData();
+        batchData.append('batch_no', String(state.batchNo));
+        batchData.append('upload_token', state.token);
+        files.slice(start, end).forEach(function (file) { batchData.append('photos', file, file.name); });
+        await jsonRequest(submitForm.dataset.uploadBatch.replace('00000000-0000-0000-0000-000000000000', state.id), batchData);
+        state.nextIndex = end;
+        state.batchNo += 1;
+        progress.querySelector('span').style.width = Math.min(95, Math.round((end / total) * 95)) + '%';
+      }
+      const completeData = new FormData();
+      completeData.append('upload_token', state.token);
+      const completed = await jsonRequest(submitForm.dataset.uploadComplete.replace('00000000-0000-0000-0000-000000000000', state.id), completeData);
+      window.__studentUploadState = null;
+      window.location.href = completed.result_url;
+    }
+    submitForm.addEventListener('submit', function (event) {
+      const photoInput = submitForm.querySelector('[name=photos]');
+      const batchSize = Number(submitForm.dataset.photoBatchSize || 20);
+      if (photoInput && photoInput.files.length > batchSize) {
+        event.preventDefault();
+        uploadInBatches().catch(function (error) {
+          submitButton.disabled = false;
+          submitButton.textContent = '继续上传 →';
+          window.alert(error.message);
+        });
+        return;
+      }
       progress.style.display = 'block';
       submitButton.disabled = true;
       submitButton.textContent = '正在上传…';

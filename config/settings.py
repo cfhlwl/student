@@ -46,7 +46,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {"default": {
     "ENGINE": "django.db.backends.sqlite3",
     "NAME": os.getenv("DATABASE_PATH", str(BASE_DIR / "db.sqlite3")),
-    "OPTIONS": {"timeout": 20},
+    "OPTIONS": {"timeout": int(os.getenv("SQLITE_BUSY_TIMEOUT_SECONDS", "30"))},
 }}
 
 AUTH_PASSWORD_VALIDATORS = [
@@ -74,6 +74,13 @@ SITE_URL = os.getenv("SITE_URL", "").rstrip("/")
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 MAX_PHOTOS_PER_SUBMISSION = int(os.getenv("MAX_PHOTOS_PER_SUBMISSION", "300"))
 MAX_DOCUMENTS_PER_SUBMISSION = int(os.getenv("MAX_DOCUMENTS_PER_SUBMISSION", "10"))
+MAX_PHOTOS_PER_BATCH = int(os.getenv("MAX_PHOTOS_PER_BATCH", "20"))
+MAX_DOCUMENTS_PER_BATCH = int(os.getenv("MAX_DOCUMENTS_PER_BATCH", "10"))
+MAX_BATCH_UPLOAD_SIZE_MB = int(os.getenv("MAX_BATCH_UPLOAD_SIZE_MB", "32"))
+DATA_UPLOAD_MAX_NUMBER_FILES = int(os.getenv("DATA_UPLOAD_MAX_NUMBER_FILES", "40"))
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DATA_UPLOAD_MAX_MEMORY_SIZE_MB", "40")) * 1024 * 1024
+EXPORT_TEMP_DIR = Path(os.getenv("EXPORT_TEMP_DIR", BASE_DIR / "data" / "exports")).resolve()
+MAX_STORAGE_MB = int(os.getenv("MAX_STORAGE_MB", "4096"))
 DATA_RETENTION_DAYS = int(os.getenv("DATA_RETENTION_DAYS", "365"))
 
 SECURE_CONTENT_TYPE_NOSNIFF = True

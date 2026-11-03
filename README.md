@@ -5,6 +5,7 @@
 ## 已实现范围
 
 - `/submit`：统一公开入口，无需注册登录；Excel 名单、批量 JPG/PNG、可选相关文档上传。
+- 大批量照片由浏览器自动拆成每批不超过 20 张且不超过 32 MB 的可重试上传会话；服务端批次具有幂等凭证，断网后可在当前页面继续提交。
 - Excel 模板下载、逐行必填/枚举/重复检查；每次提交生成独立版本、随机修改凭证。
 - 匹配方式：照片默认按唯一学生姓名匹配；同名学生不随机匹配，标记为需人工确认。
 - `/admin/`：独立管理员登录、提交版本审核/退回/采用、进度概览、学年班级范围、公开上传开关。
@@ -14,6 +15,7 @@
 - 默认按姓名命名；支持姓名+性别编号、自定义字段组合、实时预览、非法路径字符过滤、重名自动后缀。
 - 文件放在 Web 根目录之外，不提供公开媒体下载；导出不落公共静态目录；管理员操作写入审计记录。
 - Docker Compose + Gunicorn + Nginx；SQLite/私有媒体目录可独立备份。
+- 上传协调参数：单文件 20 MB、单批 32 MB、单批最多 20 张照片、Django 单请求最多 40 个文件、Nginx 40 MB、Gunicorn 300 秒；`MAX_STORAGE_MB` 控制私有媒体配额，导出临时 ZIP 使用 `EXPORT_TEMP_DIR`。
 
 ## 本地开发
 
@@ -77,14 +79,23 @@ Docker 环境：`docker compose exec web python manage.py backup_data --output /
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-测试覆盖显式文件名匹配、同名不随机匹配、Excel 重复行、跨班级/全校导出、班级统计表与总统计表存在性、三种就读类型、一次性凭证、管理员边界和关闭公开上传。GitHub Actions 未启动；本地可复现测试是 V1 当前验收证据，合并和部署仍是独立门禁。
+R1 可靠性测试：
+
+```powershell
+docker compose build web
+docker compose run --rm -v "${PWD}:/app" web python manage.py check
+docker compose run --rm -v "${PWD}:/app" web python manage.py makemigrations --check --dry-run
+docker compose run --rm -v "${PWD}:/app" web pytest -q
+```
+
+`tests/test_reliability_r1.py` 覆盖 50/100/300 张照片分批上传、数据库/磁盘/哈希一致、批次重试幂等、10 班并发提交、同班审核竞争、缺失照片异常导出、数值统计和流式临时 ZIP。Docker + Nginx 真 HTTP 联验脚本为 `tests/http_r1.py`，需要在隔离 Compose 环境中运行，并核对 50 张照片、ZIP 内容和统计 Excel，而不是只看状态码。GitHub Actions 未启动；本地可复现测试是当前验收证据，合并和部署仍是独立门禁。
 
 ## 安全边界与后续门禁
 
 - V1 不接受 ZIP 上传；图片通过 Pillow 实际解码校验，文档检查扩展名/文件头/大小。
 - 上传页不提供其他班级检索和下载；提交结果只接受对应随机凭证。
 - SQLite 适用于 V1 单实例；部署前要做并发/备份恢复/HTTPS/限流压测和真实数据脱敏检查。
-- 当前实现的上传数量/大小限制是应用层和 Nginx 层双重限制；正式上线前应按学校网络和班级规模校准。
+- 当前实现的上传数量/大小限制是应用层、Django、Nginx 三层协调限制；大批量照片必须走分批接口，不通过无限提高单请求大小解决。
 - 不要直接使用 `django-admin/` 作为对外入口；它保留给本地维护，正式管理入口是 `/admin/`。
 - 未提供自动公网开放、支付、微信小程序或现有系统迁移；这些不属于 V1 范围。
 

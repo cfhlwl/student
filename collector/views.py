@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import timedelta
+from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
@@ -14,12 +15,24 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
-from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument
-from .services import ValidationError, clear_all_collection_data, create_submission, export_students, grade_for, normalize_school_year, template_bytes, validate_naming_rule
+from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, UploadSession
+from .services import ValidationError, clear_all_collection_data, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, normalize_school_year, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, validate_naming_rule
 
 
 def client_ip(request):
     return request.META.get("REMOTE_ADDR")
+
+
+class TemporaryZipResponse(FileResponse):
+    def __init__(self, path, *args, **kwargs):
+        self._temporary_path = Path(path)
+        super().__init__(open(self._temporary_path, "rb"), *args, **kwargs)
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            self._temporary_path.unlink(missing_ok=True)
 
 
 def public_submit(request):
@@ -47,6 +60,48 @@ def public_submit(request):
     else:
         form = SubmissionForm()
     return render(request, "collector/submit.html", {"form": form})
+
+
+@require_POST
+def upload_start(request):
+    try:
+        expected_photo_count = int(request.POST.get("expected_photo_count", "0"))
+        session, token, roster_count = start_upload_session(
+            roster_upload=request.FILES.get("roster"),
+            document_uploads=request.FILES.getlist("documents"),
+            expected_photo_count=expected_photo_count,
+            note=request.POST.get("note", ""),
+            ip_address=client_ip(request),
+        )
+    except (ValidationError, TypeError, ValueError, AttributeError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse({"upload_id": str(session.id), "upload_token": token, "roster_count": roster_count, "expected_photo_count": expected_photo_count})
+
+
+@require_POST
+def upload_photo_batch(request, session_id):
+    try:
+        sequence = int(request.POST.get("batch_no", "-1"))
+        UploadSession.objects.get(pk=session_id)
+        batch, count = stage_upload_batch(session_id, "photo", sequence, request.FILES.getlist("photos"), token=request.POST.get("upload_token"))
+    except UploadSession.DoesNotExist:
+        return JsonResponse({"error": "上传会话不存在"}, status=404)
+    except (ValidationError, TypeError, ValueError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse({"batch_no": batch.sequence, "accepted": count})
+
+
+@require_POST
+def upload_complete(request, session_id):
+    try:
+        submission, token = finalize_upload_session(session_id=session_id, token=request.POST.get("upload_token", ""), ip_address=client_ip(request))
+    except UploadSession.DoesNotExist:
+        return JsonResponse({"error": "上传会话不存在"}, status=404)
+    except ValidationError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    result_path = reverse("submit-result", args=[submission.id])
+    result_url = f"{settings.SITE_URL}{result_path}" if settings.SITE_URL else request.build_absolute_uri(result_path)
+    return JsonResponse({"submission_id": str(submission.id), "token": token, "result_url": f"{result_url}?token={token}"})
 
 
 @require_GET
@@ -113,14 +168,12 @@ def admin_submissions(request):
 @require_POST
 @staff_required
 def review_submission(request, submission_id):
-    submission = get_object_or_404(Submission, id=submission_id)
     action = request.POST.get("action")
     if action in {"approved", "rejected"}:
-        submission.status = action
-        submission.reviewed_at = timezone.now()
-        submission.reviewed_by = request.user
-        submission.save(update_fields=["status", "reviewed_at", "reviewed_by"])
-        AuditLog.objects.create(actor=request.user, action=f"submission_{action}", target_type="Submission", target_id=str(submission.id), ip_address=client_ip(request))
+        try:
+            review_submission_version(submission_id=submission_id, action=action, actor=request.user, ip_address=client_ip(request))
+        except Submission.DoesNotExist:
+            raise Http404
         messages.success(request, "提交版本已" + ("采用" if action == "approved" else "退回") + "。")
     return redirect("admin-submissions")
 
@@ -183,8 +236,8 @@ def export_zip(request):
         return JsonResponse({"errors": form.errors}, status=400)
     filters = filter_values(form)
     if form.cleaned_data.get("has_photo"): filters["has_photo"] = form.cleaned_data["has_photo"]
-    payload, count, preview = export_students(filters, actor=request.user, ip_address=client_ip(request))
-    response = HttpResponse(payload, content_type="application/zip")
+    temp_path, count, preview = export_students_to_tempfile(filters, actor=request.user, ip_address=client_ip(request))
+    response = TemporaryZipResponse(temp_path, content_type="application/zip")
     response["Content-Disposition"] = 'attachment; filename="学生资料导出.zip"'
     response["X-Export-Student-Count"] = str(count)
     response["X-Export-Preview"] = json.dumps(preview, ensure_ascii=False)

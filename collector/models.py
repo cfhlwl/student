@@ -6,6 +6,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.db.models import Q
 
 
 class SchoolYear(models.Model):
@@ -59,6 +60,13 @@ class Submission(models.Model):
 
     class Meta:
         ordering = ["-submitted_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["class_group"],
+                condition=Q(status="approved"),
+                name="unique_approved_submission_per_class",
+            ),
+        ]
 
     @staticmethod
     def make_token():
@@ -117,6 +125,67 @@ class SubmissionDocument(models.Model):
     content_type = models.CharField(max_length=100)
     size = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     uploaded_at = models.DateTimeField(auto_now_add=True)
+
+
+def staged_roster_path(instance, filename):
+    return Path("upload_sessions", str(instance.id), "roster", filename).as_posix()
+
+
+class UploadSession(models.Model):
+    STATUS_CHOICES = [("pending", "上传中"), ("finalizing", "正在完成"), ("completed", "已完成"), ("failed", "失败")]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    access_token_hash = models.CharField(max_length=64, unique=True)
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="pending")
+    roster_file = models.FileField(upload_to=staged_roster_path)
+    roster_original_name = models.CharField(max_length=255)
+    note = models.CharField(max_length=500, blank=True)
+    expected_photo_count = models.PositiveIntegerField(default=0)
+    expected_document_count = models.PositiveIntegerField(default=0)
+    completed_submission = models.OneToOneField("Submission", null=True, blank=True, on_delete=models.SET_NULL, related_name="upload_session")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @staticmethod
+    def make_token():
+        return secrets.token_urlsafe(32)
+
+
+def staged_upload_path(instance, filename):
+    return Path(
+        "upload_sessions",
+        str(instance.batch.session_id),
+        instance.batch.kind,
+        str(instance.batch.sequence),
+        filename,
+    ).as_posix()
+
+
+class UploadBatch(models.Model):
+    KIND_CHOICES = [("photo", "照片"), ("document", "文档")]
+    session = models.ForeignKey(UploadSession, on_delete=models.CASCADE, related_name="batches")
+    kind = models.CharField(max_length=12, choices=KIND_CHOICES)
+    sequence = models.PositiveIntegerField()
+    digest = models.CharField(max_length=64)
+    count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["session", "kind", "sequence"], name="unique_upload_batch")]
+
+
+class StagedUpload(models.Model):
+    batch = models.ForeignKey(UploadBatch, on_delete=models.CASCADE, related_name="uploads")
+    ordinal = models.PositiveIntegerField()
+    original_name = models.CharField(max_length=255)
+    file = models.FileField(upload_to=staged_upload_path)
+    content_type = models.CharField(max_length=100)
+    size = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    sha256 = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["batch__kind", "batch__sequence", "ordinal", "id"]
+        constraints = [models.UniqueConstraint(fields=["batch", "ordinal"], name="unique_staged_upload_ordinal")]
 
 
 class NamingRule(models.Model):

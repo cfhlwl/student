@@ -144,7 +144,8 @@ def test_export_zip_without_filters_returns_zip(client):
     response = client.get(reverse("export-zip"))
     assert response.status_code == 200
     assert response["Content-Type"] == "application/zip"
-    assert response.content[:2] == b"PK"
+    assert b"".join(response.streaming_content)[:2] == b"PK"
+    response.close()
 
 
 @pytest.mark.django_db

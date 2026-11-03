@@ -5,7 +5,8 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from collector.models import Submission
+from collector.models import Submission, UploadSession
+from collector.services import clear_expired_upload_sessions
 
 
 class Command(BaseCommand):
@@ -20,11 +21,14 @@ class Command(BaseCommand):
         submissions = list(Submission.objects.filter(status="rejected", submitted_at__lt=cutoff).prefetch_related("photos", "documents"))
         if not options["yes"]:
             self.stdout.write(f"发现 {len(submissions)} 个超过 {options['days']} 天的已退回提交。加 --yes 执行清理。")
+            pending_sessions = UploadSession.objects.filter(updated_at__lt=cutoff).count()
+            self.stdout.write(f"发现 {pending_sessions} 个超过 {options['days']} 天的分批上传会话。")
             return
         count = 0
         for submission in submissions:
             for obj in list(submission.photos.all()) + list(submission.documents.all()):
                 obj.file.delete(save=False)
             submission.delete(); count += 1
-        self.stdout.write(self.style.SUCCESS(f"已清理 {count} 个已退回提交。"))
+        session_count, file_count = clear_expired_upload_sessions(options["days"])
+        self.stdout.write(self.style.SUCCESS(f"已清理 {count} 个已退回提交、{session_count} 个分批上传会话及 {file_count} 个临时文件。"))
 

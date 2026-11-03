@@ -41,6 +41,7 @@ class NamingRuleForm(forms.Form):
 class ExportFilterForm(forms.Form):
     school_year = forms.CharField(required=False, label="学年")
     department = forms.ChoiceField(required=False, choices=[("", "全部学部"), ("middle", "初中部"), ("high", "高中部")], label="学部")
+    grade = forms.ChoiceField(required=False, choices=[("", "全部年级"), ("初一", "初一"), ("初二", "初二"), ("初三", "初三"), ("高一", "高一"), ("高二", "高二"), ("高三", "高三")], label="年级")
     class_name = forms.CharField(required=False, label="班级")
     gender = forms.ChoiceField(required=False, choices=[("", "全部性别"), ("男", "男"), ("女", "女")], label="性别")
     study_type = forms.ChoiceField(required=False, choices=[("", "全部类别"), ("走读", "走读"), ("半走读", "半走读"), ("住宿", "住宿")], label="就读类型")
