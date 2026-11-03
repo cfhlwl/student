@@ -44,6 +44,6 @@ class ExportFilterForm(forms.Form):
     grade = forms.CharField(required=False, label="年级")
     class_name = forms.CharField(required=False, label="班级")
     gender = forms.ChoiceField(required=False, choices=[("", "全部性别"), ("男", "男"), ("女", "女")], label="性别")
-    study_type = forms.ChoiceField(required=False, choices=[("", "全部类别"), ("走读", "走读"), ("非走读", "非走读"), ("半走读", "半走读")], label="就读类型")
+    study_type = forms.ChoiceField(required=False, choices=[("", "全部类别"), ("走读", "走读"), ("半走读", "半走读"), ("住宿", "住宿")], label="就读类型")
     has_photo = forms.ChoiceField(required=False, choices=[("", "全部照片状态"), ("yes", "有照片"), ("no", "缺照片")], label="照片状态")
 

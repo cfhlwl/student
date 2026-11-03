@@ -130,7 +130,7 @@ def parse_roster(upload):
             row_errors.append("性别只能是男或女")
         if record.get("学部") not in {"初中部", "高中部"}:
             row_errors.append("学部只能是初中部或高中部")
-        if record.get("就读类型") not in {"走读", "非走读", "半走读"}:
+        if record.get("就读类型") not in {"走读", "半走读", "住宿"}:
             row_errors.append("就读类型不正确")
         identity = (record.get("学年"), record.get("学部"), record.get("年级"), record.get("班级"), record.get("学生编号") or record.get("姓名"))
         if identity in seen:
@@ -296,7 +296,7 @@ def _write_workbook(students, label, anomalies, filename_preview=True):
     summary_rows = [
         ("范围", label), ("总人数", total), ("男生人数", sum(s.gender == "男" for s in students)),
         ("女生人数", sum(s.gender == "女" for s in students)), ("走读人数", sum(s.study_type == "走读" for s in students)),
-        ("非走读人数", sum(s.study_type == "非走读" for s in students)), ("半走读人数", sum(s.study_type == "半走读" for s in students)),
+        ("半走读人数", sum(s.study_type == "半走读" for s in students)), ("住宿人数", sum(s.study_type == "住宿" for s in students)),
         ("成功导出照片数", sum(bool(getattr(s, "_export_name", "")) for s in students)),
         ("缺失照片数", sum(not bool(getattr(s, "_export_name", "")) for s in students)),
     ]
@@ -377,7 +377,7 @@ def template_bytes():
     sheet.merge_cells("A1:J1")
     sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、年级、班级、就读类型为必填。"
     sheet.merge_cells("A2:J2")
-    sheet["A2"] = "就读类型只能填写：走读、非走读、半走读；性别只能填写：男、女；照片文件名建议填写：姓名.jpg。"
+    sheet["A2"] = "就读类型只能填写：走读、半走读、住宿；性别只能填写：男、女；照片文件名建议填写：姓名.jpg。"
     for cell_ref in ("A1", "A2"):
         sheet[cell_ref].font = Font(bold=True, color="FFFFFF" if cell_ref == "A1" else "17233B")
         sheet[cell_ref].fill = PatternFill("solid", fgColor="17233B" if cell_ref == "A1" else "E8F5F2")

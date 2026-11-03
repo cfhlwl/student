@@ -43,7 +43,7 @@ def test_duplicate_excel_row_and_cross_class_are_rejected():
     duplicate = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""]]
     with pytest.raises(ValidationError, match="Excel 存在逐行错误"):
         create_submission(roster_upload=excel_upload(duplicate), photo_uploads=[], document_uploads=[])
-    cross_class = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "李四", "女", "高中部", "2026-2027", "高一", "2", "非走读", "", ""]]
+    cross_class = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "李四", "女", "高中部", "2026-2027", "高一", "2", "住宿", "", ""]]
     with pytest.raises(ValidationError, match="一次提交只能包含"):
         create_submission(roster_upload=excel_upload(cross_class), photo_uploads=[], document_uploads=[])
 
@@ -51,7 +51,7 @@ def test_duplicate_excel_row_and_cross_class_are_rejected():
 @pytest.mark.django_db
 def test_same_name_without_explicit_photo_is_not_randomly_matched(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
-    rows = [["A-001", "王芳", "女", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "王芳", "女", "高中部", "2026-2027", "高一", "1", "非走读", "", ""]]
+    rows = [["A-001", "王芳", "女", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "王芳", "女", "高中部", "2026-2027", "高一", "1", "住宿", "", ""]]
     submission, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[image_upload("王芳.jpg")], document_uploads=[])
     assert list(submission.students.values_list("match_status", flat=True)) == ["ambiguous", "ambiguous"]
 
@@ -128,7 +128,7 @@ def test_clear_rejected_submissions_removes_files_but_keeps_approved(settings, t
 @pytest.mark.django_db
 def test_manual_match_binds_only_same_submission(client, settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
-    rows = [["A-001", "王芳", "女", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "王芳", "女", "高中部", "2026-2027", "高一", "1", "非走读", "", ""]]
+    rows = [["A-001", "王芳", "女", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "王芳", "女", "高中部", "2026-2027", "高一", "1", "住宿", "", ""]]
     submission, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[image_upload("王芳.jpg")], document_uploads=[])
     admin = User.objects.create_user(username="manual-admin", password="strong-password-123", is_staff=True)
     client.force_login(admin)

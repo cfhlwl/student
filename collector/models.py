@@ -65,7 +65,7 @@ class Submission(models.Model):
 
 class Student(models.Model):
     GENDERS = [("男", "男"), ("女", "女")]
-    STUDY_TYPES = [("走读", "走读"), ("非走读", "非走读"), ("半走读", "半走读")]
+    STUDY_TYPES = [("走读", "走读"), ("半走读", "半走读"), ("住宿", "住宿")]
     MATCH_STATUSES = [("matched", "已匹配"), ("missing", "缺少照片"), ("ambiguous", "匹配失败/需人工确认")]
     submission = models.ForeignKey(Submission, on_delete=models.CASCADE, related_name="students")
     student_no = models.CharField(max_length=80, blank=True)
