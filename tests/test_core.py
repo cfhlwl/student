@@ -127,6 +127,11 @@ def test_public_home_has_title_and_floating_photo_guide(client):
     assert "赤峰一中学生资料采集" in content
     assert 'class="photo-guide-float"' in content
     assert 'data-photo="/static/images/photo-guide-girl.png"' in content
+    admin = User.objects.create_user(username="public-home-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    staff_content = client.get(reverse("submit")).content.decode()
+    assert "管理工作台" not in staff_content
+    assert "退出" not in staff_content
 
 
 @pytest.mark.django_db
