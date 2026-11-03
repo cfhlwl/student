@@ -8,8 +8,8 @@ from django.urls import reverse
 from openpyxl import Workbook, load_workbook
 from PIL import Image
 
-from collector.models import AppSetting, Student, StudentPhoto, Submission
-from collector.services import ValidationError, clear_rejected_submissions, create_submission, export_students, parse_roster, template_bytes
+from collector.models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission
+from collector.services import ValidationError, clear_all_collection_data, clear_rejected_submissions, create_submission, export_students, parse_roster, template_bytes
 
 
 def excel_upload(rows):
@@ -116,7 +116,33 @@ def test_dashboard_always_shows_clear_rejected_data_button(client):
     response = client.get(reverse("admin-dashboard"))
     assert response.status_code == 200
     assert reverse("clear-test-data") in response.content.decode()
-    assert "清除退回/测试数据（0）" in response.content.decode()
+    assert "清空全部采集数据" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_clear_all_collection_data_resets_database_but_keeps_admin(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    rows = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "A-001.jpg", ""]]
+    submission, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[image_upload("A-001.jpg")], document_uploads=[])
+    submission.status = "approved"
+    submission.save(update_fields=["status"])
+    admin = User.objects.create_user(username="reset-admin", password="strong-password-123", is_staff=True)
+    NamingRule.current()
+    AppSetting.set_value("public_upload_open", False)
+    counts = clear_all_collection_data()
+    assert counts["submissions"] == 1
+    assert counts["students"] == 1
+    assert counts["photos"] == 1
+    assert Submission.objects.count() == 0
+    assert Student.objects.count() == 0
+    assert StudentPhoto.objects.count() == 0
+    assert SchoolYear.objects.count() == 0
+    assert ClassGroup.objects.count() == 0
+    assert NamingRule.objects.count() == 0
+    assert AppSetting.objects.count() == 0
+    assert AuditLog.objects.count() == 0
+    assert User.objects.filter(username=admin.username).exists()
+    assert list((tmp_path / "submissions").iterdir()) == []
 
 
 @pytest.mark.django_db

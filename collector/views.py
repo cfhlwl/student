@@ -15,7 +15,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument
-from .services import ValidationError, clear_rejected_submissions, create_submission, export_students, template_bytes, validate_naming_rule
+from .services import ValidationError, clear_all_collection_data, create_submission, export_students, template_bytes, validate_naming_rule
 
 
 def client_ip(request):
@@ -229,8 +229,8 @@ def toggle_upload(request):
 @require_POST
 @staff_required
 def clear_test_data(request):
-    submissions, students, files = clear_rejected_submissions(actor=request.user, ip_address=client_ip(request))
-    messages.success(request, f"已清除 {submissions} 个退回/测试提交、{students} 条学生记录和 {files} 个私有文件；已采用数据未受影响。")
+    counts = clear_all_collection_data()
+    messages.success(request, f"已初始化数据库：清除提交 {counts['submissions']} 个、学生 {counts['students']} 条、照片 {counts['photos']} 张、文档 {counts['documents']} 个及全部采集配置；管理员账号已保留。")
     return redirect("admin-dashboard")
 
 

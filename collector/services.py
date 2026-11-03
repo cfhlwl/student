@@ -2,8 +2,10 @@ import hashlib
 import io
 import re
 import secrets
+import shutil
 import zipfile
 from collections import Counter, defaultdict
+from pathlib import Path
 from pathlib import PurePosixPath
 
 from django.conf import settings
@@ -368,6 +370,39 @@ def clear_rejected_submissions(actor=None, ip_address=None):
         submission.delete()
     AuditLog.objects.create(actor=actor, action="clear_rejected_submissions", detail={"submissions": len(submissions), "students": removed_students, "files": removed_files}, ip_address=ip_address)
     return len(submissions), removed_students, removed_files
+
+
+@transaction.atomic
+def clear_all_collection_data():
+    """Reset collection data while preserving administrator accounts."""
+    photos = list(StudentPhoto.objects.all())
+    documents = list(SubmissionDocument.objects.all())
+    for obj in photos + documents:
+        obj.file.delete(save=False)
+
+    counts = {
+        "submissions": Submission.objects.count(),
+        "students": Student.objects.count(),
+        "photos": len(photos),
+        "documents": len(documents),
+        "classes": ClassGroup.objects.count(),
+        "school_years": SchoolYear.objects.count(),
+        "naming_rules": NamingRule.objects.count(),
+        "settings": AppSetting.objects.count(),
+        "audit_logs": AuditLog.objects.count(),
+    }
+    Submission.objects.all().delete()
+    Student.objects.all().delete()
+    ClassGroup.objects.all().delete()
+    SchoolYear.objects.all().delete()
+    NamingRule.objects.all().delete()
+    AppSetting.objects.all().delete()
+    AuditLog.objects.all().delete()
+
+    submissions_root = Path(settings.MEDIA_ROOT) / "submissions"
+    shutil.rmtree(submissions_root, ignore_errors=True)
+    submissions_root.mkdir(parents=True, exist_ok=True)
+    return counts
 
 
 def template_bytes():
