@@ -1,0 +1,4 @@
+{% extends 'collector/base.html' %}
+{% block title %}管理员登录 · {{ site_name }}{% endblock %}
+{% block content %}<main class="login-page"><div class="eyebrow">管理工作台 / 受保护入口</div><h1>管理员登录</h1><p class="lede">仅限学校授权管理员使用。公开提交者无法进入此区域。</p><form method="post" class="login-card">{% csrf_token %}{% if form.non_field_errors %}<div class="error-box">{{ form.non_field_errors }}</div>{% endif %}<label>用户名{{ form.username }}</label><label>密码{{ form.password }}</label><button class="button primary" type="submit">登录管理工作台 →</button></form></main>{% endblock %}
+

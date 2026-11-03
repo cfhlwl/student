@@ -1,0 +1,3 @@
+{% extends 'collector/base.html' %}
+{% block content %}<div class="admin-layout"><aside class="sidebar"><div class="sidebar-label">工作台</div><a href="{% url 'admin-dashboard' %}">数据概览</a><a href="{% url 'admin-submissions' %}">提交版本</a><a href="{% url 'admin-students' %}">学生资料与导出</a><div class="sidebar-label">设置</div><a href="{% url 'admin-classes' %}">学年与班级</a><a href="{% url 'admin-naming' %}">照片命名</a><div class="sidebar-bottom"><span>{{ request.user.username }}</span><a href="{% url 'admin-logout' %}">安全退出</a></div></aside><section class="admin-content">{% if messages %}{% for message in messages %}<div class="flash">{{ message }}</div>{% endfor %}{% endif %}{% block admin_content %}{% endblock %}</section></div>{% endblock %}
+

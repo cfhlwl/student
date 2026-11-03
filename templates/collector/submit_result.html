@@ -1,0 +1,6 @@
+{% extends 'collector/base.html' %}
+{% block title %}提交结果 · {{ site_name }}{% endblock %}
+{% block content %}
+<main class="narrow-page"><div class="eyebrow">仅限本次提交版本</div><h1>匹配结果</h1><p class="lede">提交编号：<code>{{ submission.id }}</code> · 状态：{{ submission.get_status_display }}</p><div class="result-list">{% for student in students %}<div class="result-row"><div><strong>{{ student.name }}</strong><span>{{ student.class_name }} · {{ student.study_type }}</span></div><span class="status status-{{ student.match_status }}">{{ student.get_match_status_display }}</span></div>{% empty %}<p>没有学生记录。</p>{% endfor %}</div><a class="back-link" href="{% url 'submit' %}">返回统一入口</a></main>
+{% endblock %}
+

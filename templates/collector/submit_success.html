@@ -1,0 +1,6 @@
+{% extends 'collector/base.html' %}
+{% block title %}提交成功 · {{ site_name }}{% endblock %}
+{% block content %}
+<main class="narrow-page"><div class="success-mark">✓</div><div class="eyebrow">提交已生成独立版本</div><h1>资料已收到。</h1><p class="lede">请保存下面的提交编号和修改凭证。凭证只允许查看本次提交版本，离开页面后不会再次显示。</p><div class="metric-grid receipt-metrics"><div class="metric"><span>学生记录</span><strong>{{ submission.students.count }}</strong></div><div class="metric accent"><span>已匹配照片</span><strong>{{ matched_count }}</strong></div><div class="metric warn"><span>待处理</span><strong>{{ missing_count }}</strong></div></div><div class="receipt"><div><span>提交编号</span><strong>{{ submission.id }}</strong></div><div><span>修改凭证</span><code>{{ token }}</code></div></div><div class="warning-box">修改凭证相当于本次提交的访问钥匙，请勿转发给无关人员。</div><a class="button primary" href="{{ result_url }}?token={{ token }}">查看匹配结果 →</a><a class="back-link" href="{% url 'submit' %}">继续提交另一个版本</a></main>
+{% endblock %}
+
