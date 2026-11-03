@@ -120,6 +120,16 @@ def test_public_result_requires_token_and_staff_boundary(client):
 
 
 @pytest.mark.django_db
+def test_public_home_has_title_and_floating_photo_guide(client):
+    response = client.get(reverse("submit"))
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "赤峰一中学生资料采集" in content
+    assert 'class="photo-guide-float"' in content
+    assert 'data-photo="/static/images/photo-guide-girl.png"' in content
+
+
+@pytest.mark.django_db
 def test_export_zip_without_filters_returns_zip(client):
     admin = User.objects.create_user(username="export-admin", password="strong-password-123", is_staff=True)
     client.force_login(admin)

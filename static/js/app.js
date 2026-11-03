@@ -50,6 +50,11 @@ document.addEventListener('DOMContentLoaded', function () {
   const photoModal = document.getElementById('photo-modal');
   const photoModalImage = document.getElementById('photo-modal-image');
   const photoModalCaption = document.getElementById('photo-modal-caption');
+  const photoGuideOpen = document.getElementById('photo-guide-open');
+  const firstPhotoChoice = document.querySelector('.photo-guide-choice');
+  if (photoGuideOpen && firstPhotoChoice) {
+    photoGuideOpen.addEventListener('click', function () { firstPhotoChoice.click(); });
+  }
   document.querySelectorAll('.photo-zoom-trigger').forEach(function (trigger) {
     trigger.addEventListener('click', function () {
       photoModalImage.src = trigger.dataset.photo;
