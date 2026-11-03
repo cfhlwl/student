@@ -15,8 +15,8 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
-from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, UploadSession
-from .services import ValidationError, clear_all_collection_data, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, normalize_grade, normalize_school_year, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, validate_naming_rule
+from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
+from .services import ValidationError, clear_all_collection_data, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 
 
 def client_ip(request):
@@ -72,8 +72,10 @@ def upload_start(request):
             expected_photo_count=expected_photo_count,
             expected_document_count=int(request.POST.get("expected_document_count", str(len(request.FILES.getlist("documents"))))),
             photo_manifest=request.POST.get("photo_manifest", ""),
+            document_manifest=request.POST.get("document_manifest", ""),
             roster_fingerprint=request.POST.get("roster_fingerprint", ""),
             note=request.POST.get("note", ""),
+            idempotency_key=request.POST.get("idempotency_key", ""),
             ip_address=client_ip(request),
         )
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:
@@ -147,6 +149,26 @@ def upload_complete(request, session_id):
 
 
 @require_GET
+def upload_status(request, session_id):
+    try:
+        data = upload_session_status(
+            session_id=session_id,
+            token=request.GET.get("upload_token", ""),
+            manifest_digest=request.GET.get("manifest_digest"),
+            roster_fingerprint=request.GET.get("roster_fingerprint"),
+        )
+    except UploadSession.DoesNotExist:
+        return JsonResponse({"error": "上传会话不存在或已过期"}, status=404)
+    except ValidationError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if data.get("completed_submission_id") and data.get("result_token"):
+        result_path = reverse("submit-result", args=[data["completed_submission_id"]])
+        result_url = f"{settings.SITE_URL}{result_path}" if settings.SITE_URL else request.build_absolute_uri(result_path)
+        data["result_url"] = f"{result_url}?token={data['result_token']}"
+    return JsonResponse(data)
+
+
+@require_GET
 def download_template(request):
     response = HttpResponse(template_bytes(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     response["Content-Disposition"] = 'attachment; filename="学生名单模板.xlsx"'
@@ -159,7 +181,28 @@ def submit_result(request, submission_id):
     submission = get_object_or_404(Submission, id=submission_id)
     if not token or hashlib.sha256(token.encode()).hexdigest() != submission.access_token_hash:
         raise Http404
-    return render(request, "collector/submit_result.html", {"submission": submission, "students": submission.students.all()})
+    supplements = submission.photo_supplements.prefetch_related("photos").all()
+    return render(request, "collector/submit_result.html", {"submission": submission, "students": submission.students.all(), "supplements": supplements})
+
+
+@require_POST
+def submit_supplement(request, submission_id):
+    token = request.POST.get("token", "")
+    try:
+        supplement, matched_count, ambiguous_count = create_photo_supplement(
+            submission_id=submission_id,
+            token=token,
+            photo_uploads=request.FILES.getlist("photos"),
+            note=request.POST.get("note", ""),
+            ip_address=client_ip(request),
+        )
+    except Submission.DoesNotExist:
+        raise Http404
+    except ValidationError as exc:
+        messages.error(request, str(exc))
+        return redirect(f"{reverse('submit-result', args=[submission_id])}?token={token}")
+    messages.success(request, f"补传已提交：{matched_count} 张自动匹配，{ambiguous_count} 张待管理员人工确认。")
+    return redirect(f"{reverse('submit-result', args=[submission_id])}?token={token}")
 
 
 def is_staff(user):
@@ -204,7 +247,38 @@ def admin_dashboard(request):
 def admin_submissions(request):
     submissions = Submission.objects.select_related("class_group", "school_year", "reviewed_by").all()
     if request.GET.get("status"): submissions = submissions.filter(status=request.GET["status"])
-    return render(request, "collector/admin_submissions.html", {"submissions": submissions})
+    supplements = PhotoSupplement.objects.filter(status="pending").select_related("submission", "submission__class_group").prefetch_related("photos", "photos__student")
+    return render(request, "collector/admin_submissions.html", {"submissions": submissions, "supplements": supplements})
+
+
+@require_POST
+@staff_required
+def review_supplement(request, supplement_id):
+    try:
+        review_photo_supplement(supplement_id=supplement_id, action=request.POST.get("action"), actor=request.user, ip_address=client_ip(request))
+    except PhotoSupplement.DoesNotExist:
+        raise Http404
+    except ValidationError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "补传照片已" + ("采用" if request.POST.get("action") == "approved" else "退回") + "。")
+    return redirect("admin-submissions")
+
+
+@require_POST
+@staff_required
+def manual_supplement_match(request, photo_id):
+    photo = get_object_or_404(SupplementPhoto, id=photo_id, student__isnull=True, supplement__status="pending")
+    student = get_object_or_404(Student, id=request.POST.get("student_id"), submission=photo.supplement.submission)
+    if StudentPhoto.objects.filter(student=student).exists():
+        messages.error(request, "该学生已有照片，不能覆盖原照片。")
+    else:
+        photo.student = student
+        photo.match_status = "matched"
+        photo.save(update_fields=["student", "match_status"])
+        AuditLog.objects.create(actor=request.user, action="manual_supplement_photo_match", target_type="Student", target_id=str(student.id), detail={"photo_id": photo.id, "supplement_id": str(photo.supplement_id)}, ip_address=client_ip(request))
+        messages.success(request, f"已将 {photo.original_name} 绑定到 {student.name}。")
+    return redirect("admin-submissions")
 
 
 @require_POST

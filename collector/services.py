@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 
 from django.conf import settings
 from django.core.files.storage import default_storage
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.utils import OperationalError
 from django.utils import timezone
 from openpyxl import Workbook, load_workbook
@@ -25,7 +25,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from PIL import Image, UnidentifiedImageError
 
-from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, UploadBatch, UploadSession
+from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
@@ -97,37 +97,45 @@ def upload_sha256(upload):
     return digest.hexdigest()
 
 
-def _normalize_photo_manifest(value, expected_count):
+def _normalize_upload_manifest(value, expected_count, label):
     if value in (None, "", []):
         if expected_count:
-            raise ValidationError("照片清单不能为空，请重新选择照片后提交")
+            raise ValidationError(f"{label}清单不能为空，请重新选择文件后提交")
         return []
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except json.JSONDecodeError as exc:
-            raise ValidationError("照片清单格式不正确，请重新选择文件") from exc
+            raise ValidationError(f"{label}清单格式不正确，请重新选择文件") from exc
     if not isinstance(value, list) or len(value) != expected_count:
-        raise ValidationError("照片清单与照片数量不一致，请重新选择文件")
+        raise ValidationError(f"{label}清单与文件数量不一致，请重新选择文件")
     manifest = []
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
-            raise ValidationError(f"第 {index} 个照片清单项格式不正确")
+            raise ValidationError(f"第 {index} 个{label}清单项格式不正确")
         original_name = str(item.get("name") or "")
         name = safe_filename(original_name)
         if not original_name or name != original_name:
-            raise ValidationError(f"第 {index} 个照片文件名不安全")
+            raise ValidationError(f"第 {index} 个{label}文件名不安全")
         try:
             size = int(item.get("size"))
         except (TypeError, ValueError) as exc:
-            raise ValidationError(f"第 {index} 个照片大小不正确") from exc
+            raise ValidationError(f"第 {index} 个{label}大小不正确") from exc
         if size < 1:
-            raise ValidationError(f"第 {index} 个照片大小不正确")
+            raise ValidationError(f"第 {index} 个{label}大小不正确")
         sha256 = str(item.get("sha256") or "").lower()
-        if sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256):
-            raise ValidationError(f"第 {index} 个照片哈希不正确")
+        if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValidationError(f"第 {index} 个{label}哈希不正确或为空")
         manifest.append({"name": name, "size": size, "sha256": sha256})
     return manifest
+
+
+def _normalize_photo_manifest(value, expected_count):
+    return _normalize_upload_manifest(value, expected_count, "照片")
+
+
+def _normalize_document_manifest(value, expected_count):
+    return _normalize_upload_manifest(value, expected_count, "文档")
 
 
 def _manifest_json_digest(manifest):
@@ -344,7 +352,7 @@ def _prepare_documents(document_uploads):
     total_size = 0
     for upload in document_uploads:
         content_type = document_info(upload)
-        prepared.append(PreparedUpload(upload.name, _safe_upload_name(upload), content_type, upload.size, "", source=upload))
+        prepared.append(PreparedUpload(upload.name, _safe_upload_name(upload), content_type, upload.size, upload_sha256(upload), source=upload))
         total_size += upload.size
     if total_size > settings.MAX_BATCH_UPLOAD_SIZE_MB * 1024 * 1024:
         raise ValidationError(f"本批文档总大小不能超过 {settings.MAX_BATCH_UPLOAD_SIZE_MB} MB")
@@ -378,7 +386,14 @@ def _delete_stored_files(names):
 
 def _check_storage_quota(additional_bytes):
     root = Path(settings.MEDIA_ROOT)
-    used = sum(path.stat().st_size for path in root.rglob("*") if path.is_file()) if root.exists() else 0
+    def file_size(path):
+        try:
+            return path.stat().st_size if path.is_file() else 0
+        except (FileNotFoundError, OSError):
+            # Finalization may remove a staged file between the directory scan
+            # and stat(); the quota check must remain safe under concurrent uploads.
+            return 0
+    used = sum(file_size(path) for path in root.rglob("*")) if root.exists() else 0
     quota = settings.MAX_STORAGE_MB * 1024 * 1024
     if used + additional_bytes > quota:
         raise ValidationError(f"文件存储配额不足，当前配额为 {settings.MAX_STORAGE_MB} MB")
@@ -607,7 +622,7 @@ def _check_upload_token(session, token):
         raise ValidationError("上传凭证无效")
 
 
-def start_upload_session(*, roster_upload, document_uploads, expected_photo_count=0, expected_document_count=None, photo_manifest=None, roster_fingerprint="", note="", ip_address=None):
+def start_upload_session(*, roster_upload, document_uploads, expected_photo_count=0, expected_document_count=None, photo_manifest=None, document_manifest=None, roster_fingerprint="", note="", ip_address=None, idempotency_key=""):
     if expected_photo_count < 0 or expected_photo_count > settings.MAX_PHOTOS_PER_SUBMISSION:
         raise ValidationError(f"照片数量不能超过 {settings.MAX_PHOTOS_PER_SUBMISSION} 张")
     if expected_document_count is None:
@@ -621,21 +636,56 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
     documents = _prepare_documents(document_uploads)
     if documents and len(documents) != expected_document_count:
         raise ValidationError("文档清单与文档数量不一致，请重新选择文件")
+    if document_manifest in (None, "", []):
+        # Older HTTP clients did not send a document manifest. Keep those
+        # clients compatible; new clients send it so resumed sessions get the
+        # same strict name/size/SHA256 validation as photos.
+        normalized_document_manifest = [{"name": item.original_name, "size": item.size, "sha256": item.sha256} for item in documents] if documents else []
+    else:
+        normalized_document_manifest = _normalize_document_manifest(document_manifest, expected_document_count)
+    if documents:
+        for expected, actual in zip(normalized_document_manifest, documents):
+            if expected != {"name": actual.original_name, "size": actual.size, "sha256": actual.sha256}:
+                raise ValidationError("文档名称、大小或内容已变化，请重新选择文件")
     _check_storage_quota(roster_upload.size + sum(item.size for item in documents))
     roster_sha256 = upload_sha256(roster_upload)
-    token = UploadSession.make_token()
-    session = _with_db_retry(lambda: UploadSession.objects.create(
-        access_token_hash=hashlib.sha256(token.encode()).hexdigest(),
-        roster_original_name=_safe_upload_name(roster_upload),
-        roster_sha256=roster_sha256,
-        roster_fingerprint=str(roster_fingerprint or "")[:255],
-        note=note[:500],
-        expected_student_count=len(records),
-        expected_photo_count=expected_photo_count,
-        expected_document_count=expected_document_count,
-        photo_manifest=normalized_manifest,
-        photo_manifest_digest=_manifest_json_digest(normalized_manifest),
-    ))
+    idempotency_key = str(idempotency_key or "")[:64]
+    token = hmac.new(settings.SECRET_KEY.encode("utf-8"), f"student-collector-upload:{idempotency_key}".encode("utf-8"), hashlib.sha256).hexdigest() if idempotency_key else UploadSession.make_token()
+    def create_session():
+        defaults = {
+            "access_token_hash": hashlib.sha256(token.encode()).hexdigest(),
+            "roster_original_name": _safe_upload_name(roster_upload),
+            "roster_sha256": roster_sha256,
+            "roster_fingerprint": str(roster_fingerprint or "")[:255],
+            "note": note[:500],
+            "expected_student_count": len(records),
+            "expected_photo_count": expected_photo_count,
+            "expected_document_count": expected_document_count,
+            "photo_manifest": normalized_manifest,
+            "photo_manifest_digest": _manifest_json_digest(normalized_manifest),
+            "document_manifest": normalized_document_manifest,
+            "document_manifest_digest": _manifest_json_digest(normalized_document_manifest),
+        }
+        if idempotency_key:
+            session, created = UploadSession.objects.get_or_create(start_idempotency_key=idempotency_key, defaults=defaults)
+            return session, created
+        return UploadSession.objects.create(**defaults), True
+    try:
+        session, created = _with_db_retry(create_session)
+    except IntegrityError:
+        if not idempotency_key:
+            raise
+        session = _with_db_retry(lambda: UploadSession.objects.get(start_idempotency_key=idempotency_key))
+        created = False
+    if not created:
+        if session.expected_photo_count != expected_photo_count or session.expected_document_count != expected_document_count:
+            raise ValidationError("上传会话与当前文件清单不一致，请重新选择文件")
+        if session.photo_manifest_digest != _manifest_json_digest(normalized_manifest) or session.document_manifest_digest != _manifest_json_digest(normalized_document_manifest):
+            raise ValidationError("上传会话与当前文件清单不一致，请重新选择文件")
+        if not session.roster_file.name:
+            stored_roster = default_storage.save(f"upload_sessions/{session.id}/roster/{_safe_upload_name(roster_upload)}", roster_upload)
+            _with_db_retry(lambda: UploadSession.objects.filter(pk=session.pk).update(roster_file=stored_roster))
+        return session, token, session.expected_student_count
     stored_names = []
     try:
         roster_name = default_storage.save(f"upload_sessions/{session.id}/roster/{_safe_upload_name(roster_upload)}", roster_upload)
@@ -715,6 +765,17 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manif
                         raise ValidationError("照片名称、大小或顺序已变化，请重新选择 Excel 和照片后提交")
                     if expected_item.get("sha256") and expected_item["sha256"] != actual_item.sha256:
                         raise ValidationError("照片内容已变化，请重新选择 Excel 和照片后提交")
+            if kind == "document" and locked_session.document_manifest:
+                previous = list(UploadBatch.objects.filter(session=locked_session, kind="document").order_by("sequence"))
+                if [item.sequence for item in previous] != list(range(sequence)):
+                    raise ValidationError("文档批次必须按顺序上传，请从上一个成功批次继续")
+                offset = sum(item.count for item in previous)
+                expected = locked_session.document_manifest[offset:offset + len(prepared)]
+                if len(expected) != len(prepared):
+                    raise ValidationError("文档数量超过提交时的文档清单")
+                for expected_item, actual_item in zip(expected, prepared):
+                    if expected_item["name"] != actual_item.original_name or expected_item["size"] != actual_item.size or expected_item["sha256"] != actual_item.sha256:
+                        raise ValidationError("文档名称、大小或顺序已变化，请重新选择文件")
             return None
 
     already_saved = _with_db_retry(existing_batch)
@@ -747,13 +808,160 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manif
         batch = _with_db_retry(save_batch)
         if batch.count == len(prepared) and batch.digest == digest:
             # A retried batch is already persisted; its newly written files are not needed.
-            persisted = list(batch.uploads.order_by("ordinal"))
+            persisted = _with_db_retry(lambda: list(batch.uploads.order_by("ordinal")))
             if persisted and all(item.file.name != stored_names[index] for index, item in enumerate(persisted)):
                 _delete_stored_files(stored_names)
         return batch, len(prepared)
     except Exception:
         _delete_stored_files(stored_names)
         raise
+
+
+def upload_session_status(*, session_id, token, manifest_digest=None, roster_fingerprint=None):
+    session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
+    _check_upload_token(session, token)
+    if session.photo_manifest_digest and manifest_digest and manifest_digest != session.photo_manifest_digest:
+        raise ValidationError("照片清单已变化，请重新选择 Excel 和照片后提交")
+    if session.roster_fingerprint and roster_fingerprint and roster_fingerprint != session.roster_fingerprint:
+        raise ValidationError("Excel 文件已变化，请重新选择 Excel 和照片后提交")
+    batches = []
+    confirmed_photo_count = 0
+    confirmed_document_count = 0
+    for batch in UploadBatch.objects.filter(session=session).prefetch_related("uploads").order_by("kind", "sequence"):
+        uploads = list(batch.uploads.all())
+        item = {
+            "kind": batch.kind,
+            "sequence": batch.sequence,
+            "count": batch.count,
+            "digest": batch.digest,
+            "uploads": [
+                {"ordinal": row.ordinal, "name": row.original_name, "size": row.size, "sha256": row.sha256}
+                for row in uploads
+            ],
+        }
+        batches.append(item)
+        if batch.kind == "photo":
+            confirmed_photo_count += batch.count
+        else:
+            confirmed_document_count += batch.count
+    completed_submission_id = str(session.completed_submission_id) if session.completed_submission_id else ""
+    return {
+        "upload_id": str(session.id),
+        "status": session.status,
+        "expected_student_count": session.expected_student_count,
+        "expected_photo_count": session.expected_photo_count,
+        "expected_document_count": session.expected_document_count,
+        "confirmed_photo_count": confirmed_photo_count,
+        "confirmed_document_count": confirmed_document_count,
+        "photo_manifest": session.photo_manifest,
+        "photo_manifest_digest": session.photo_manifest_digest,
+        "document_manifest": session.document_manifest,
+        "document_manifest_digest": session.document_manifest_digest,
+        "roster_fingerprint": session.roster_fingerprint,
+        "batches": batches,
+        "completed_submission_id": completed_submission_id,
+        "result_token": _session_result_token(session.id) if completed_submission_id else "",
+    }
+
+
+def _check_submission_token(submission, token):
+    if not token or hashlib.sha256(token.encode()).hexdigest() != submission.access_token_hash:
+        raise ValidationError("访问凭证无效")
+
+
+def create_photo_supplement(*, submission_id, token, photo_uploads, note="", ip_address=None):
+    submission = _with_db_retry(lambda: Submission.objects.prefetch_related("students").get(pk=submission_id))
+    _check_submission_token(submission, token)
+    if submission.status == "rejected":
+        raise ValidationError("退回的提交版本不能补传照片")
+    if not photo_uploads:
+        raise ValidationError("请选择需要补传的照片")
+    if len(photo_uploads) > settings.MAX_PHOTOS_PER_BATCH:
+        raise ValidationError(f"每次最多补传 {settings.MAX_PHOTOS_PER_BATCH} 张照片")
+    prepared = _prepare_photos(photo_uploads)
+    _check_storage_quota(sum(item.size for item in prepared))
+
+    def create_rows():
+        with transaction.atomic():
+            locked = Submission.objects.select_for_update().get(pk=submission.pk)
+            if PhotoSupplement.objects.filter(submission=locked, status="pending").exists():
+                raise ValidationError("已有待管理员确认的补传，请等待审核")
+            students = list(Student.objects.filter(submission=locked).order_by("id"))
+            existing_names = set(StudentPhoto.objects.filter(submission=locked).values_list("student_id", flat=True))
+            by_name = defaultdict(list)
+            for student in students:
+                by_name[student.name].append(student)
+            matches = []
+            seen_students = set()
+            for item in prepared:
+                stem = PurePosixPath(item.original_name).stem
+                candidates = [student for student in by_name.get(stem, []) if student.id not in existing_names and student.id not in seen_students]
+                student = candidates[0] if len(candidates) == 1 else None
+                if student:
+                    seen_students.add(student.id)
+                matches.append(student)
+            supplement = PhotoSupplement.objects.create(submission=locked, note=note[:500])
+            return supplement, matches
+
+    supplement, matches = _with_db_retry(create_rows)
+    stored_names = []
+    try:
+        rows = []
+        for item, student in zip(prepared, matches):
+            stored = _store_prepared_upload(item, f"supplements/{supplement.id}/photos/{item.original_name}")
+            stored_names.append(stored)
+            rows.append(SupplementPhoto(
+                supplement=supplement, student=student, original_name=item.original_name, file=stored,
+                content_type=item.content_type, size=item.size, sha256=item.sha256,
+                match_status="matched" if student else "ambiguous",
+            ))
+        SupplementPhoto.objects.bulk_create(rows)
+        AuditLog.objects.create(actor=None, action="photo_supplement_created", target_type="Submission", target_id=str(submission.id), detail={"supplement_id": str(supplement.id), "photo_count": len(rows)}, ip_address=ip_address)
+        return supplement, sum(bool(student) for student in matches), len(matches) - sum(bool(student) for student in matches)
+    except Exception:
+        _delete_stored_files(stored_names)
+        supplement.delete()
+        raise
+
+
+def review_photo_supplement(*, supplement_id, action, actor, ip_address=None):
+    if action not in {"approved", "rejected"}:
+        raise ValidationError("补传审核操作不正确")
+
+    def operation():
+        with transaction.atomic():
+            supplement = PhotoSupplement.objects.select_for_update().select_related("submission").get(pk=supplement_id)
+            if supplement.status != "pending":
+                raise ValidationError("补传已审核")
+            photos = list(supplement.photos.select_related("student"))
+            if action == "approved":
+                if any(photo.match_status != "matched" or photo.student_id is None for photo in photos):
+                    raise ValidationError("仍有照片无法唯一匹配，请先人工绑定")
+                for photo in photos:
+                    if StudentPhoto.objects.filter(student_id=photo.student_id).exists():
+                        raise ValidationError("补传照片将覆盖已有照片，操作已拒绝")
+                for photo in photos:
+                    StudentPhoto.objects.create(student=photo.student, submission=supplement.submission, original_name=photo.original_name, file=photo.file.name, content_type=photo.content_type, size=photo.size, sha256=photo.sha256)
+                    photo.student.match_status = "matched"
+                    photo.student.save(update_fields=["match_status"])
+                supplement.status = "approved"
+            else:
+                supplement.status = "rejected"
+            supplement.reviewed_at = timezone.now()
+            supplement.reviewed_by = actor
+            supplement.save(update_fields=["status", "reviewed_at", "reviewed_by"])
+            AuditLog.objects.create(actor=actor, action=f"photo_supplement_{action}", target_type="Submission", target_id=str(supplement.submission_id), detail={"supplement_id": str(supplement.id), "photo_count": len(photos)}, ip_address=ip_address)
+            return supplement
+
+    result = _with_db_retry(operation)
+    if result.status == "approved":
+        # The files are now referenced by StudentPhoto; keep them. Rejected files are private
+        # and can be removed after the audit transaction has completed.
+        return result
+    rejected_files = list(result.photos.values_list("file", flat=True))
+    _delete_stored_files(rejected_files)
+    result.photos.all().delete()
+    return result
 
 
 def _mark_upload_session_completed(session_id, submission):
@@ -1136,12 +1344,16 @@ def clear_expired_upload_sessions(days, actor=None, ip_address=None):
 def clear_all_collection_data():
     """Reset collection data while preserving administrator accounts."""
     photos = list(StudentPhoto.objects.all())
+    supplements = list(PhotoSupplement.objects.prefetch_related("photos"))
+    supplement_photos = [photo for supplement in supplements for photo in supplement.photos.all()]
     documents = list(SubmissionDocument.objects.all())
     submissions = list(Submission.objects.all())
     staged_uploads = list(StagedUpload.objects.all())
     upload_sessions = list(UploadSession.objects.all())
     roster_count = sum(bool(submission.roster_file) for submission in submissions)
     for obj in photos + documents:
+        obj.file.delete(save=False)
+    for obj in supplement_photos:
         obj.file.delete(save=False)
     for submission in submissions:
         if submission.roster_file:
@@ -1165,6 +1377,8 @@ def clear_all_collection_data():
         "audit_logs": AuditLog.objects.count(),
         "staged_uploads": len(staged_uploads),
         "upload_sessions": len(upload_sessions),
+        "supplements": len(supplements),
+        "supplement_photos": len(supplement_photos),
     }
     Submission.objects.all().delete()
     Student.objects.all().delete()
@@ -1179,6 +1393,8 @@ def clear_all_collection_data():
     submissions_root.mkdir(parents=True, exist_ok=True)
     upload_sessions_root = Path(settings.MEDIA_ROOT) / "upload_sessions"
     shutil.rmtree(upload_sessions_root, ignore_errors=True)
+    supplements_root = Path(settings.MEDIA_ROOT) / "supplements"
+    shutil.rmtree(supplements_root, ignore_errors=True)
     return counts
 
 

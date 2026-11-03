@@ -107,6 +107,44 @@ def document_path(instance, filename):
     return Path("submissions", str(instance.submission_id), "documents", filename).as_posix()
 
 
+def supplement_photo_path(instance, filename):
+    return Path("supplements", str(instance.supplement_id), "photos", filename).as_posix()
+
+
+class PhotoSupplement(models.Model):
+    STATUS_CHOICES = [("pending", "待管理员确认"), ("approved", "已采用"), ("rejected", "已退回")]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    submission = models.ForeignKey("Submission", on_delete=models.CASCADE, related_name="photo_supplements")
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="pending")
+    note = models.CharField(max_length=500, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="reviewed_photo_supplements")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["submission"],
+                condition=Q(status="pending"),
+                name="unique_pending_photo_supplement_per_submission",
+            ),
+        ]
+
+
+class SupplementPhoto(models.Model):
+    MATCH_STATUSES = [("matched", "已匹配"), ("ambiguous", "待人工确认")]
+    supplement = models.ForeignKey(PhotoSupplement, on_delete=models.CASCADE, related_name="photos")
+    student = models.ForeignKey(Student, null=True, blank=True, on_delete=models.CASCADE, related_name="supplement_photos")
+    original_name = models.CharField(max_length=255)
+    file = models.FileField(upload_to=supplement_photo_path)
+    content_type = models.CharField(max_length=100)
+    size = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    sha256 = models.CharField(max_length=64)
+    match_status = models.CharField(max_length=12, choices=MATCH_STATUSES, default="ambiguous")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class StudentPhoto(models.Model):
     student = models.OneToOneField(Student, on_delete=models.CASCADE, related_name="photo", null=True, blank=True)
     submission = models.ForeignKey(Submission, on_delete=models.CASCADE, related_name="photos")
@@ -135,6 +173,7 @@ class UploadSession(models.Model):
     STATUS_CHOICES = [("pending", "上传中"), ("finalizing", "正在完成"), ("completed", "已完成"), ("failed", "失败")]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     access_token_hash = models.CharField(max_length=64, unique=True)
+    start_idempotency_key = models.CharField(max_length=64, unique=True, null=True, blank=True)
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="pending")
     roster_file = models.FileField(upload_to=staged_roster_path)
     roster_original_name = models.CharField(max_length=255)
@@ -146,6 +185,8 @@ class UploadSession(models.Model):
     expected_document_count = models.PositiveIntegerField(default=0)
     photo_manifest = models.JSONField(default=list, blank=True)
     photo_manifest_digest = models.CharField(max_length=64, blank=True)
+    document_manifest = models.JSONField(default=list, blank=True)
+    document_manifest_digest = models.CharField(max_length=64, blank=True)
     completed_submission = models.OneToOneField("Submission", null=True, blank=True, on_delete=models.SET_NULL, related_name="upload_session")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
