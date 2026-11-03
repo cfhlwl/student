@@ -91,7 +91,6 @@ def upload_start(request):
 def upload_photo_batch(request, session_id):
     try:
         sequence = int(request.POST.get("batch_no", "-1"))
-        UploadSession.objects.get(pk=session_id)
         batch, count = stage_upload_batch(
             session_id,
             "photo",
@@ -112,7 +111,6 @@ def upload_photo_batch(request, session_id):
 def upload_document_batch(request, session_id):
     try:
         sequence = int(request.POST.get("batch_no", "-1"))
-        UploadSession.objects.get(pk=session_id)
         batch, count = stage_upload_batch(
             session_id,
             "document",

@@ -578,7 +578,7 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
     _check_storage_quota(roster_upload.size + sum(item.size for item in documents))
     roster_sha256 = upload_sha256(roster_upload)
     token = UploadSession.make_token()
-    session = UploadSession.objects.create(
+    session = _with_db_retry(lambda: UploadSession.objects.create(
         access_token_hash=hashlib.sha256(token.encode()).hexdigest(),
         roster_original_name=_safe_upload_name(roster_upload),
         roster_sha256=roster_sha256,
@@ -588,12 +588,12 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         expected_document_count=expected_document_count,
         photo_manifest=normalized_manifest,
         photo_manifest_digest=_manifest_json_digest(normalized_manifest),
-    )
+    ))
     stored_names = []
     try:
         roster_name = default_storage.save(f"upload_sessions/{session.id}/roster/{_safe_upload_name(roster_upload)}", roster_upload)
         stored_names.append(roster_name)
-        UploadSession.objects.filter(pk=session.pk).update(roster_file=roster_name)
+        _with_db_retry(lambda: UploadSession.objects.filter(pk=session.pk).update(roster_file=roster_name))
         if documents:
             stage_upload_batch(
                 session.id,
@@ -629,7 +629,7 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manif
     if sum(item.size for item in prepared) > settings.MAX_BATCH_UPLOAD_SIZE_MB * 1024 * 1024:
         raise ValidationError(f"本批文件总大小不能超过 {settings.MAX_BATCH_UPLOAD_SIZE_MB} MB")
     digest = _manifest_digest(prepared)
-    session = UploadSession.objects.get(pk=session_id)
+    session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
     if not trusted_internal:
         _check_upload_token(session, token)
     elif token is not None:
@@ -718,7 +718,7 @@ def _mark_upload_session_completed(session_id, submission):
 
 
 def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_fingerprint=None, ip_address=None):
-    session = UploadSession.objects.get(pk=session_id)
+    session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
     _check_upload_token(session, token)
 
     def claim_session():
