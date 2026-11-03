@@ -10,11 +10,12 @@
   <section class="photo-guide" id="photo-guide">
     <div class="photo-guide-heading"><div><span class="kicker">照片拍摄示例</span><h2>先把照片拍对，再一次提交</h2><p>请准备单人、正脸、清晰的近期照片。下面的示例同时包含女生版和男生版，点击图片可查看大图。</p></div><span class="guide-badge">建议：正脸 · 清晰 · 单人</span></div>
     <div class="photo-guide-grid">
-      <figure><a href="{% static 'images/photo-guide-girl.png' %}" target="_blank" rel="noopener"><img src="{% static 'images/photo-guide-girl.png' %}" alt="女生注册照片拍摄示例" loading="lazy"></a><figcaption>女生版拍摄示例</figcaption></figure>
-      <figure><a href="{% static 'images/photo-guide-boy.png' %}" target="_blank" rel="noopener"><img src="{% static 'images/photo-guide-boy.png' %}" alt="男生注册照片拍摄示例" loading="lazy"></a><figcaption>男生版拍摄示例</figcaption></figure>
+      <figure><button class="photo-zoom-trigger" type="button" data-photo="{% static 'images/photo-guide-girl.png' %}" data-caption="女生版拍摄示例"><img src="{% static 'images/photo-guide-girl.png' %}" alt="女生注册照片拍摄示例" loading="lazy"><span>点击放大</span></button><figcaption>女生版拍摄示例</figcaption></figure>
+      <figure><button class="photo-zoom-trigger" type="button" data-photo="{% static 'images/photo-guide-boy.png' %}" data-caption="男生版拍摄示例"><img src="{% static 'images/photo-guide-boy.png' %}" alt="男生注册照片拍摄示例" loading="lazy"><span>点击放大</span></button><figcaption>男生版拍摄示例</figcaption></figure>
     </div>
     <div class="photo-rule-grid"><div><strong>合格照片</strong><p>简单背景；正脸平视；表情自然；镜片无反光；面部光照均匀；脸部区域建议不低于 128×128 像素。</p></div><div><strong>容易无法识别</strong><p>低头、抬头、偏头、侧脸、打电话、模糊、太暗、过度修图、多人合照、分辨率太低、面部不完整或被遮挡。</p></div></div>
   </section>
+  <div class="photo-modal" id="photo-modal" hidden><div class="photo-modal-backdrop" data-photo-close></div><div class="photo-modal-dialog" role="dialog" aria-modal="true" aria-label="照片示例大图"><button class="photo-modal-close" type="button" data-photo-close aria-label="关闭大图">×</button><img id="photo-modal-image" src="" alt=""><p id="photo-modal-caption"></p></div></div>
   <section class="process-strip"><div><b>01</b><span>准备名单</span></div><div><b>02</b><span>批量选照片</span></div><div><b>03</b><span>提交并核对</span></div></section>
   {% if form.non_field_errors %}<div class="error-box">{% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
   <form method="post" enctype="multipart/form-data" class="submit-card" id="submit-form">

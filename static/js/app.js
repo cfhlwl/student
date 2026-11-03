@@ -35,5 +35,24 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   [mode, template, male, female, separator].filter(Boolean).forEach(function (el) { el.addEventListener('input', renderPreview); el.addEventListener('change', renderPreview); });
   renderPreview();
+  const photoModal = document.getElementById('photo-modal');
+  const photoModalImage = document.getElementById('photo-modal-image');
+  const photoModalCaption = document.getElementById('photo-modal-caption');
+  document.querySelectorAll('.photo-zoom-trigger').forEach(function (trigger) {
+    trigger.addEventListener('click', function () {
+      photoModalImage.src = trigger.dataset.photo;
+      photoModalImage.alt = trigger.dataset.caption || '照片示例大图';
+      photoModalCaption.textContent = trigger.dataset.caption || '';
+      photoModal.hidden = false;
+      document.body.style.overflow = 'hidden';
+    });
+  });
+  document.querySelectorAll('[data-photo-close]').forEach(function (close) {
+    close.addEventListener('click', function () {
+      photoModal.hidden = true;
+      photoModalImage.src = '';
+      document.body.style.overflow = '';
+    });
+  });
 });
 
