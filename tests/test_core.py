@@ -15,8 +15,11 @@ from collector.services import ValidationError, clear_all_collection_data, clear
 def excel_upload(rows):
     book = Workbook()
     sheet = book.active
-    sheet.append(["学生编号", "姓名", "性别", "学部", "学年", "年级", "班级", "就读类型", "照片文件名", "备注"])
-    for row in rows: sheet.append(row)
+    sheet.append(["姓名", "性别", "学部", "学年", "班级", "就读类型", "备注"])
+    for row in rows:
+        if len(row) == 10:  # keep older test fixtures readable while the public contract stays at 7 columns
+            row = [row[1], row[2], row[3], str(row[4]).split("-")[0], row[6], row[7], row[9]]
+        sheet.append(row)
     data = io.BytesIO(); book.save(data)
     return SimpleUploadedFile("名单.xlsx", data.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -28,13 +31,17 @@ def image_upload(name, color=(220, 80, 60)):
 
 
 @pytest.mark.django_db
-def test_submission_matches_explicit_filename_and_keeps_token_isolated(settings, tmp_path):
+def test_submission_matches_photo_by_unique_name_and_keeps_token_isolated(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
-    rows = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "A-001.jpg", ""]]
-    submission, token = create_submission(roster_upload=excel_upload(rows), photo_uploads=[image_upload("A-001.jpg")], document_uploads=[])
+    rows = [["张三", "男", "高中部", "2026", "1", "走读", ""]]
+    submission, token = create_submission(roster_upload=excel_upload(rows), photo_uploads=[image_upload("张三.jpg")], document_uploads=[])
     assert len(token) >= 40
     assert submission.students.get().match_status == "matched"
-    assert submission.students.get().photo.file.name.endswith("A-001.jpg")
+    assert submission.students.get().photo.file.name.endswith("张三.jpg")
+    assert submission.students.get().grade == "高一"
+    assert submission.students.get().student_no == ""
+    assert submission.students.get().photo_filename_hint == ""
+    assert submission.roster_file.name.endswith("名单.xlsx")
     assert Submission.objects.filter(id=submission.id).exists()
 
 
@@ -44,7 +51,7 @@ def test_duplicate_excel_row_and_cross_class_are_rejected():
     with pytest.raises(ValidationError, match="Excel 存在逐行错误"):
         create_submission(roster_upload=excel_upload(duplicate), photo_uploads=[], document_uploads=[])
     cross_class = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "李四", "女", "高中部", "2026-2027", "高一", "2", "住宿", "", ""]]
-    with pytest.raises(ValidationError, match="一次提交只能包含"):
+    with pytest.raises(ValidationError, match="一次提交只能包含同一学部、学年和班级"):
         create_submission(roster_upload=excel_upload(cross_class), photo_uploads=[], document_uploads=[])
 
 
@@ -59,25 +66,45 @@ def test_same_name_without_explicit_photo_is_not_randomly_matched(settings, tmp_
 @pytest.mark.django_db
 def test_export_contains_per_class_statistics_and_total(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
-    first_rows = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "A-001.jpg", ""]]
-    second_rows = [["B-001", "李四", "女", "高中部", "2026-2027", "高一", "2", "半走读", "B-001.jpg", ""]]
-    first, _ = create_submission(roster_upload=excel_upload(first_rows), photo_uploads=[image_upload("A-001.jpg")], document_uploads=[])
-    second, _ = create_submission(roster_upload=excel_upload(second_rows), photo_uploads=[image_upload("B-001.jpg")], document_uploads=[])
+    first_rows = [["张三", "男", "高中部", "2026", "1", "走读", ""]]
+    second_rows = [["李四", "女", "高中部", "2026", "2", "半走读", ""]]
+    first, _ = create_submission(roster_upload=excel_upload(first_rows), photo_uploads=[image_upload("张三.jpg")], document_uploads=[])
+    second, _ = create_submission(roster_upload=excel_upload(second_rows), photo_uploads=[image_upload("李四.jpg")], document_uploads=[])
     User.objects.create_user(username="admin", password="a-strong-password-123", is_staff=True)
     first.status = "approved"; first.save(update_fields=["status"])
     second.status = "approved"; second.save(update_fields=["status"])
-    payload, count, preview = export_students({"school_year__name": "2026-2027", "department": "high", "grade": "高一"})
+    payload, count, preview = export_students({"school_year__name": "2026", "department": "high"})
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
         assert any(name.endswith("/学生统计表.xlsx") for name in names)
         assert "总统计表.xlsx" in names
-        assert any(name.endswith("/学生照片/张三.jpg") for name in names)
-        assert any(name.endswith("/学生照片/李四.jpg") for name in names)
+        assert any(name.endswith("/走读/学生照片/张三.jpg") for name in names)
+        assert any(name.endswith("/半走读/学生照片/李四.jpg") for name in names)
+        assert any(name.endswith("/学生名单/名单.xlsx") for name in names)
         stats_file = next(name for name in names if name.endswith("/学生统计表.xlsx"))
         stats = load_workbook(io.BytesIO(archive.read(stats_file)), read_only=True)
         assert set(stats.sheetnames) == {"统计汇总", "学生明细", "异常记录"}
     assert count == 2
     assert preview == ["张三.jpg", "李四.jpg"]
+
+
+@pytest.mark.django_db
+def test_all_export_splits_study_types_and_includes_original_roster(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    rows = [["走读生", "男", "高中部", "2026", "1", "走读", ""], ["半走读生", "女", "高中部", "2026", "1", "半走读", ""], ["住宿生", "男", "高中部", "2026", "1", "住宿", ""]]
+    submission, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[image_upload("走读生.jpg"), image_upload("半走读生.jpg"), image_upload("住宿生.jpg")], document_uploads=[])
+    submission.status = "approved"; submission.save(update_fields=["status"])
+    payload, count, _ = export_students({"school_year__name": "2026", "department": "high"})
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        names = set(archive.namelist())
+        assert "高中部/高一/1/走读/学生统计表.xlsx" in names
+        assert "高中部/高一/1/半走读/学生统计表.xlsx" in names
+        assert "高中部/高一/1/住宿/学生统计表.xlsx" in names
+        assert "高中部/高一/1/走读/学生照片/走读生.jpg" in names
+        assert "高中部/高一/1/半走读/学生照片/半走读生.jpg" in names
+        assert "高中部/高一/1/住宿/学生照片/住宿生.jpg" in names
+        assert "高中部/高一/1/学生名单/名单.xlsx" in names
+    assert count == 3
 
 
 @pytest.mark.django_db
@@ -133,6 +160,7 @@ def test_clear_all_collection_data_resets_database_but_keeps_admin(settings, tmp
     assert counts["submissions"] == 1
     assert counts["students"] == 1
     assert counts["photos"] == 1
+    assert counts["rosters"] == 1
     assert Submission.objects.count() == 0
     assert Student.objects.count() == 0
     assert StudentPhoto.objects.count() == 0
@@ -190,27 +218,32 @@ def test_manual_match_binds_only_same_submission(client, settings, tmp_path):
 @pytest.mark.django_db
 def test_export_escapes_formula_like_user_values(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
-    rows = [["S-001", "正常姓名", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""]]
+    rows = [["正常姓名", "男", "高中部", "2026", "1", "走读", ""]]
     submission, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[], document_uploads=[])
     student = submission.students.get()
-    student.student_no = "=CMD"; student.name = "=姓名"; student.save(update_fields=["student_no", "name"])
+    student.name = "=姓名"; student.save(update_fields=["name"])
     submission.status = "approved"; submission.save(update_fields=["status"])
     payload, _, _ = export_students({})
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         stats_file = next(name for name in archive.namelist() if name.endswith("/学生统计表.xlsx"))
         book = load_workbook(io.BytesIO(archive.read(stats_file)), data_only=False)
-        assert book["学生明细"]["A2"].value == "'=CMD"
-        assert book["学生明细"]["B2"].value == "'=姓名"
+        assert book["学生明细"]["A2"].value == "'=姓名"
 
 
 def test_template_has_expected_columns():
     book = load_workbook(io.BytesIO(template_bytes()), read_only=True)
     rows = list(book.active.values)
-    assert rows[3][:8] == ("学生编号", "姓名", "性别", "学部", "学年", "年级", "班级", "就读类型")
-    assert rows[4][8] == "示例同学.jpg"
+    assert rows[3][:7] == ("姓名", "性别", "学部", "学年", "班级", "就读类型", "备注")
+    assert rows[4][:6] == ("示例同学", "男", "高中部", "2026", "1", "走读")
 
 
 def test_parser_accepts_template_instruction_rows():
     upload = SimpleUploadedFile("模板.xlsx", template_bytes(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    assert parse_roster(upload)[0]["照片文件名"] == "示例同学.jpg"
+    assert parse_roster(upload)[0]["姓名"] == "示例同学"
+    assert parse_roster(upload)[0]["年级"] == "高一"
+
+
+def test_parser_derives_middle_school_grade_from_school_year():
+    upload = excel_upload([["初中同学", "女", "初中部", "2024", "1", "住宿", ""]])
+    assert parse_roster(upload)[0]["年级"] == "初三"
 

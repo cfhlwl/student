@@ -15,7 +15,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument
-from .services import ValidationError, clear_all_collection_data, create_submission, export_students, template_bytes, validate_naming_rule
+from .services import ValidationError, clear_all_collection_data, create_submission, export_students, grade_for, normalize_school_year, template_bytes, validate_naming_rule
 
 
 def client_ip(request):
@@ -230,7 +230,7 @@ def toggle_upload(request):
 @staff_required
 def clear_test_data(request):
     counts = clear_all_collection_data()
-    messages.success(request, f"已初始化数据库：清除提交 {counts['submissions']} 个、学生 {counts['students']} 条、照片 {counts['photos']} 张、文档 {counts['documents']} 个及全部采集配置；管理员账号已保留。")
+    messages.success(request, f"已初始化数据库：清除提交 {counts['submissions']} 个、学生 {counts['students']} 条、照片 {counts['photos']} 张、文档 {counts['documents']} 个、学生名单 {counts['rosters']} 个及全部采集配置；管理员账号已保留。")
     return redirect("admin-dashboard")
 
 
@@ -244,10 +244,18 @@ def admin_classes(request):
             messages.success(request, "采集范围已切换为" + ("仅已配置班级" if scope == "configured" else "全校全部范围") + "。")
             return redirect("admin-classes")
         year_name = request.POST.get("school_year", "").strip()
-        if year_name and request.POST.get("grade") and request.POST.get("name"):
-            year, _ = SchoolYear.objects.get_or_create(name=year_name, defaults={"is_active": True})
-            ClassGroup.objects.get_or_create(department=request.POST.get("department"), school_year=year, grade=request.POST.get("grade"), name=request.POST.get("name"), defaults={"is_active": True})
-            messages.success(request, "班级范围已保存。")
+        department = request.POST.get("department", "")
+        class_name = request.POST.get("name", "").strip()
+        if year_name and department and class_name:
+            try:
+                year_name = normalize_school_year(year_name)
+                grade = grade_for(department, year_name)
+            except ValidationError as exc:
+                messages.error(request, str(exc))
+            else:
+                year, _ = SchoolYear.objects.get_or_create(name=year_name, defaults={"is_active": True})
+                ClassGroup.objects.get_or_create(department=department, school_year=year, grade=grade, name=class_name, defaults={"is_active": True})
+                messages.success(request, "班级范围已保存。年级已根据学部和学年自动确定为" + grade + "。")
             return redirect("admin-classes")
     return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all(), "collection_scope": AppSetting.get_value("collection_scope", "all")})
 

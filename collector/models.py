@@ -37,6 +37,10 @@ class ClassGroup(models.Model):
         return f"{self.get_department_display()} / {self.school_year} / {self.grade}{self.name}"
 
 
+def roster_path(instance, filename):
+    return Path("submissions", str(instance.id), "roster", filename).as_posix()
+
+
 class Submission(models.Model):
     STATUS_CHOICES = [("pending", "待审核"), ("approved", "已采用"), ("rejected", "已退回")]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -51,6 +55,7 @@ class Submission(models.Model):
     submitted_at = models.DateTimeField(auto_now_add=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
     reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="reviewed_submissions")
+    roster_file = models.FileField(upload_to=roster_path, blank=True)
 
     class Meta:
         ordering = ["-submitted_at"]

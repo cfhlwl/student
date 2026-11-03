@@ -15,7 +15,7 @@
 |---|---|---:|
 | Django 系统检查 | `python manage.py check` | 0 |
 | 迁移漂移检查 | `python manage.py makemigrations --check --dry-run` | 0 |
-| 自动化回归 | `python -m pytest -q` | 0，9 passed |
+| 自动化回归 | `python -m pytest -q` | 0，17 passed |
 | Compose 配置 | `docker compose config` | 0 |
 | Docker 镜像构建 | `docker build -t student-collector-v1:local .` | 0 |
 | 容器空库迁移 | `docker run --rm ... python manage.py migrate --noinput` | 0 |
@@ -25,11 +25,13 @@
 
 ## 自动化覆盖
 
-- 显式照片文件名匹配和私有文件落盘。
+- 唯一姓名照片匹配和原始学生名单私有文件落盘。
+- 2024/2025/2026 学年与初高中年级自动推导。
 - Excel 重复记录和跨班级提交拒绝。
 - 同名学生不随机匹配，进入待人工确认列表。
 - 管理员人工匹配只允许绑定同一提交版本，且不覆盖已有照片。
 - 多班级导出：每个班级有 `学生统计表.xlsx` / `学生照片/`，跨班级有 `总统计表.xlsx`。
+- 全部类别导出按走读、半走读、住宿分目录，并保留班级原始学生名单。
 - 导出统计工作表包含统计汇总、学生明细、异常记录；最终文件名可追溯。
 - 公式样式输入在导出 Excel 中加前缀，避免公式注入。
 - 一次性提交凭证、跨班级访问边界、管理员登录边界、关闭公开上传。

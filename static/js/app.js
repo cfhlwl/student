@@ -36,7 +36,7 @@ document.addEventListener('DOMContentLoaded', function () {
     let text = template.value || '{姓名}';
     if (mode.value === 'name') text = '{姓名}';
     if (mode.value === 'gender_no') text = '{姓名}' + (separator.value || '') + '{性别编号}';
-    const values = {'{姓名}':'张三','{学生编号}':'2026-001','{性别编号}':male.value || '01','{学部}':'高中部','{年级}':'高一','{班级}':'1','{就读类型}':'走读'};
+    const values = {'{姓名}':'张三','{性别编号}':male.value || '01','{学部}':'高中部','{班级}':'1','{就读类型}':'走读'};
     Object.keys(values).forEach(function (key) { text = text.replaceAll(key, values[key]); });
     preview.textContent = text + '.jpg';
   }

@@ -3,7 +3,7 @@
 {% block content %}
 <main class="public-page">
   <section class="hero">
-    <div class="eyebrow">统一入口 / 2026—2027 学年</div>
+    <div class="eyebrow">统一入口 / 2026 学年</div>
     <p class="hero-copy">不用注册，不用记密码。选好文件后提交，系统会自动识别名单、匹配照片，并把缺漏和重名标出来。</p>
     <div class="hero-note"><span class="pulse"></span> 当前公开上传：<strong>{% if upload_open %}开放{% else %}已关闭{% endif %}</strong><span class="dot">·</span> 每次提交都会生成独立版本</div>
   </section>
@@ -22,7 +22,7 @@
     {% csrf_token %}
     <div class="card-heading"><div><span class="kicker">采集表单</span><h2>上传班级资料</h2></div><a class="text-link" href="{% url 'submit-template' %}">下载 Excel 模板 ↗</a></div>
     <div class="form-grid">
-      <label class="upload-field wide"><span class="field-title">Excel 学生名单 <i>必填</i></span><span class="field-help">一行一位学生，系统会逐行检查姓名、学部、年级、班级和就读类型</span><input type="file" name="roster" accept=".xlsx" required><span class="file-hint">点击选择 .xlsx 文件</span><span class="file-count" data-file-count="roster"></span>{% for error in form.roster.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</label>
+      <label class="upload-field wide"><span class="field-title">Excel 学生名单 <i>必填</i></span><span class="field-help">填写姓名、性别、学部、学年、班级和就读类型；年级由系统自动判断，照片默认按姓名匹配</span><input type="file" name="roster" accept=".xlsx" required><span class="file-hint">点击选择 .xlsx 文件</span><span class="file-count" data-file-count="roster"></span>{% for error in form.roster.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</label>
       <label class="upload-field"><span class="field-title">学生照片 <i class="soft">可选</i></span><span class="field-help">支持 JPG / PNG，可一次选择多张</span><input type="file" name="photos" accept=".jpg,.jpeg,.png" multiple><span class="file-hint">点击或拖入照片</span><span class="file-count" data-file-count="photos"></span></label>
       <label class="upload-field"><span class="field-title">相关文档 <i class="soft">可选</i></span><span class="field-help">通知、说明等，单次最多 10 个</span><input type="file" name="documents" accept=".pdf,.doc,.docx,.xls,.xlsx" multiple><span class="file-hint">点击选择文档</span><span class="file-count" data-file-count="documents"></span></label>
     </div>
