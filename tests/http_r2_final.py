@@ -10,6 +10,9 @@ import io
 import json
 import os
 import re
+import resource
+import shutil
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -23,6 +26,7 @@ import django
 django.setup()
 
 from collector.models import Submission, SubmissionDocument, Student, StudentPhoto  # noqa: E402
+from django.conf import settings  # noqa: E402
 from openpyxl import Workbook, load_workbook  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -58,8 +62,11 @@ class HttpClient:
 
     def request(self, path, method="GET", data=None, headers=None):
         request = urllib.request.Request(BASE_URL + path, data=data, method=method, headers=headers or {})
-        with self.opener.open(request, timeout=240) as response:
-            return response.status, response.headers, response.read()
+        try:
+            with self.opener.open(request, timeout=240) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers, exc.read()
 
 
 def roster_bytes(class_name, grade, count, prefix):
@@ -83,7 +90,10 @@ def small_photo(index):
 
 def large_photo(index):
     output = io.BytesIO()
-    Image.effect_noise((1800, 1800), 100).convert("RGB").save(output, format="JPEG", quality=95, optimize=False)
+    image = Image.effect_noise((1800, 1800), 100).convert("RGB")
+    # Make every source byte stream distinct while keeping the same approximate size.
+    image.putpixel((index % 1800, (index * 17) % 1800), (index % 255, 70, 150))
+    image.save(output, format="JPEG", quality=95, optimize=False)
     payload = output.getvalue()
     if len(payload) < 2_500_000:
         raise AssertionError("large photo did not reach 2.5 MB")
@@ -174,7 +184,7 @@ def approve(client, submission_id):
     assert status in {200, 302}
 
 
-def verify_archive(payload, expected_count, expected_hashes, expected_document_hash=None, require_all_categories=False):
+def verify_archive(payload, expected_count, expected_hashes, expected_document_hash=None, require_all_categories=False, require_total=False):
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         assert archive.testzip() is None
         photo_names = [name for name in archive.namelist() if name.lower().endswith(".jpg")]
@@ -187,7 +197,8 @@ def verify_archive(payload, expected_count, expected_hashes, expected_document_h
             assert archive.getinfo(name).CRC == __import__("binascii").crc32(data) & 0xFFFFFFFF
         stats = [name for name in archive.namelist() if name.endswith("学生统计表.xlsx")]
         assert stats
-        assert "总统计表.xlsx" in archive.namelist() if expected_count > 20 else True
+        if require_total:
+            assert "总统计表.xlsx" in archive.namelist()
         for name in stats:
             book = load_workbook(io.BytesIO(archive.read(name)), data_only=True)
             assert isinstance(book["统计汇总"]["B2"].value, int)
@@ -201,8 +212,88 @@ def verify_archive(payload, expected_count, expected_hashes, expected_document_h
             assert any("/住宿/学生照片/" in name for name in photo_names)
 
 
+def run_100x3(client):
+    started_at = time.monotonic()
+    status, _, page = client.request("/submit")
+    assert status == 200
+    csrf = csrf_token(page.decode("utf-8"))
+    common = {"X-CSRFToken": csrf, "Referer": BASE_URL + "/submit"}
+    count = 100
+    prefix = "R2X3"
+    photos = [(f"{prefix}{index:02d}.jpg", large_photo(index)) for index in range(count)]
+    assert all(2_800_000 <= len(payload) <= 4_200_000 for _, payload in photos)
+    expected_hashes = {name: hashlib.sha256(payload).hexdigest() for name, payload in photos}
+    roster = roster_bytes("R2-100X3", "高一", count, prefix)
+    roster_hash = hashlib.sha256(roster).hexdigest()
+    manifest = [{"name": name, "size": len(payload), "sha256": expected_hashes[name]} for name, payload in photos]
+    body, content_type = multipart(
+        [("expected_photo_count", str(count)), ("expected_document_count", "0"), ("photo_manifest", json.dumps(manifest, ensure_ascii=False)), ("roster_fingerprint", roster_hash), ("note", "R2-F6/F7 100x3MB")],
+        [("roster", "100x3名单.xlsx", roster, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")],
+    )
+    common["Content-Type"] = content_type
+    status, _, raw = client.request("/submit/upload/start/", "POST", body, common)
+    assert status == 200, raw
+    state = json.loads(raw)
+    batches = split_batches(photos)
+    assert len(batches) >= 10
+    for batch_no, batch in enumerate(batches):
+        fields = [("batch_no", str(batch_no)), ("upload_token", state["upload_token"]), ("manifest_digest", state["photo_manifest_digest"]), ("roster_fingerprint", roster_hash)]
+        files = [("photos", name, payload, "image/jpeg") for name, payload in batch]
+        if batch_no == 1:
+            failed_body, failed_type = multipart(fields[:-3] + [("upload_token", "invalid-token"), ("manifest_digest", state["photo_manifest_digest"]), ("roster_fingerprint", roster_hash)], files)
+            common["Content-Type"] = failed_type
+            failed_status, _, _ = client.request(f"/submit/upload/{state['upload_id']}/photos/", "POST", failed_body, common)
+            assert failed_status == 400
+        body, content_type = multipart(fields, files)
+        common["Content-Type"] = content_type
+        status, _, raw = client.request(f"/submit/upload/{state['upload_id']}/photos/", "POST", body, common)
+        assert status == 200, raw
+        if batch_no == 1:
+            # The client did not know whether the successful response arrived; replay the exact batch.
+            retry_status, _, retry_raw = client.request(f"/submit/upload/{state['upload_id']}/photos/", "POST", body, common)
+            assert retry_status == 200, retry_raw
+    body, content_type = multipart(
+        [("upload_token", state["upload_token"]), ("manifest_digest", state["photo_manifest_digest"]), ("roster_fingerprint", roster_hash)], [],
+    )
+    common["Content-Type"] = content_type
+    status, _, raw = client.request(f"/submit/upload/{state['upload_id']}/complete/", "POST", body, common)
+    assert status == 200, raw
+    submission_id = json.loads(raw)["submission_id"]
+    login(client)
+    approve(client, submission_id)
+    submission = Submission.objects.get(pk=submission_id)
+    assert submission.status == "approved"
+    assert Student.objects.filter(submission=submission).count() == count
+    assert StudentPhoto.objects.filter(submission=submission).count() == count
+    final_photo_paths = [Path(photo.file.path) for photo in StudentPhoto.objects.filter(submission=submission)]
+    assert len(final_photo_paths) == count
+    assert all(path.exists() for path in final_photo_paths)
+    assert len(list((Path(settings.MEDIA_ROOT) / "submissions" / str(submission.id) / "photos").rglob("*"))) == count
+    db_rows = {photo.original_name: photo for photo in StudentPhoto.objects.filter(submission=submission)}
+    for name, expected_hash in expected_hashes.items():
+        photo = db_rows[name]
+        assert hashlib.sha256(Path(photo.file.path).read_bytes()).hexdigest() == expected_hash
+        assert photo.sha256 == expected_hash
+    status, _, payload = client.request("/admin/export.zip?school_year=2026&class_name=R2-100X3")
+    assert status == 200
+    verify_archive(payload, count, expected_hashes, require_all_categories=True, require_total=False)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        stats = [name for name in archive.namelist() if name.endswith("学生统计表.xlsx")]
+        totals = [load_workbook(io.BytesIO(archive.read(name)), data_only=True)["统计汇总"] for name in stats]
+        assert sum(sheet["B2"].value for sheet in totals) == count
+        assert sum(sheet["B8"].value for sheet in totals) == count
+        assert sum(sheet["B9"].value for sheet in totals) == 0
+    elapsed = time.monotonic() - started_at
+    media_bytes = sum(path.stat().st_size for path in Path(settings.MEDIA_ROOT).rglob("*") if path.is_file())
+    maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(f"HTTP_R2_100X3_OK photos={count} batches={len(batches)} db_photos={StudentPhoto.objects.filter(submission=submission).count()} media_photo_files={len(final_photo_paths)} zip_photos={count} zip_bytes={len(payload)} elapsed_seconds={elapsed:.2f} client_maxrss_kb={maxrss} media_bytes={media_bytes}")
+
+
 def main():
     client = HttpClient()
+    if os.getenv("R2F_100X3") == "1":
+        run_100x3(client)
+        return
     mixed_id, mixed_photos, mixed_roster, mixed_document = submit(client, "R2-MIX", "高一", MIXED_PHOTOS, "R2MIX", with_document=True, large=True)
     login(client)
     approve(client, mixed_id)

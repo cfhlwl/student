@@ -394,6 +394,52 @@ def _delete_submission_storage(submission_id):
         shutil.rmtree(root)
 
 
+def _file_matches_expected(file_field, expected_size=None, expected_sha256=""):
+    """Return whether a private stored file is complete and, when available, hashed as expected."""
+    if not file_field or not file_field.name or not default_storage.exists(file_field.name):
+        return False
+    try:
+        digest = hashlib.sha256()
+        total = 0
+        with file_field.open("rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                digest.update(chunk)
+        if expected_size is not None and total != expected_size:
+            return False
+        return not expected_sha256 or hmac.compare_digest(digest.hexdigest(), expected_sha256)
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+
+
+def _submission_is_complete(submission, *, expected_student_count=None, expected_photo_count=None, expected_document_count=None):
+    """Check every durable part before an upload session may be reported complete."""
+    if not _file_matches_expected(submission.roster_file):
+        return False
+    if expected_student_count is not None and submission.students.count() != expected_student_count:
+        return False
+    photos = list(submission.photos.select_related("student"))
+    if expected_photo_count is not None and len(photos) != expected_photo_count:
+        return False
+    documents = list(submission.documents.all())
+    if expected_document_count is not None and len(documents) != expected_document_count:
+        return False
+    for photo in photos:
+        if photo.student_id and photo.student.submission_id != submission.id:
+            return False
+        if not _file_matches_expected(photo.file, photo.size, photo.sha256):
+            return False
+    for document in documents:
+        if not _file_matches_expected(document.file, document.size):
+            return False
+    return AuditLog.objects.filter(
+        action="public_submit", target_type="Submission", target_id=str(submission.id)
+    ).exists()
+
+
 def _create_submission_records(*, records, roster_name, roster_candidate, photo_inputs, document_inputs, note, ip_address, access_token=None, expected_student_count=None, expected_photo_count=None, expected_document_count=None):
     scopes = {(r.get("学部"), r.get("学年"), r.get("年级"), r.get("班级")) for r in records}
     if len(scopes) != 1:
@@ -402,24 +448,24 @@ def _create_submission_records(*, records, roster_name, roster_candidate, photo_
         access_hash = hashlib.sha256(access_token.encode()).hexdigest()
         existing_submission = _with_db_retry(lambda: Submission.objects.filter(access_token_hash=access_hash).first())
         if existing_submission is not None:
-            complete = (
-                bool(existing_submission.roster_file.name)
-                and default_storage.exists(existing_submission.roster_file.name)
-                and (expected_student_count is None or existing_submission.students.count() == expected_student_count)
-                and (expected_photo_count is None or existing_submission.photos.count() == expected_photo_count)
-                and (expected_document_count is None or existing_submission.documents.count() == expected_document_count)
-                and all(default_storage.exists(name) for name in existing_submission.photos.values_list("file", flat=True))
-                and all(default_storage.exists(name) for name in existing_submission.documents.values_list("file", flat=True))
-                and AuditLog.objects.filter(action="public_submit", target_type="Submission", target_id=str(existing_submission.id)).exists()
-            )
-            if complete:
+            if _submission_is_complete(
+                existing_submission,
+                expected_student_count=expected_student_count,
+                expected_photo_count=expected_photo_count,
+                expected_document_count=expected_document_count,
+            ):
                 return existing_submission, access_token
             partial_id = existing_submission.id
             existing_files = [existing_submission.roster_file.name]
             existing_files.extend(existing_submission.photos.values_list("file", flat=True))
             existing_files.extend(existing_submission.documents.values_list("file", flat=True))
+            # A recovered finalization may still reference staged session files. They are
+            # the inputs for the retry and must not be deleted with the partial Submission.
+            protected_names = {roster_candidate.stored_name}
+            protected_names.update(item.stored_name for item in photo_inputs if item.stored_name)
+            protected_names.update(item.stored_name for item in document_inputs if item.stored_name)
             existing_submission.delete()
-            _delete_stored_files(existing_files)
+            _delete_stored_files(name for name in existing_files if name and name not in protected_names)
             _delete_submission_storage(partial_id)
     collection_scope = _with_db_retry(lambda: AppSetting.get_value("collection_scope", "all"))
     if collection_scope == "configured":
@@ -584,6 +630,7 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         roster_sha256=roster_sha256,
         roster_fingerprint=str(roster_fingerprint or "")[:255],
         note=note[:500],
+        expected_student_count=len(records),
         expected_photo_count=expected_photo_count,
         expected_document_count=expected_document_count,
         photo_manifest=normalized_manifest,
@@ -735,7 +782,12 @@ def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_f
                 stable_token = _session_result_token(session_id)
                 recovered = Submission.objects.filter(access_token_hash=hashlib.sha256(stable_token.encode()).hexdigest()).first()
                 stale_at = timezone.now() - timedelta(seconds=settings.UPLOAD_FINALIZING_TIMEOUT_SECONDS)
-                if recovered is not None:
+                if recovered is not None and _submission_is_complete(
+                    recovered,
+                    expected_student_count=locked.expected_student_count or None,
+                    expected_photo_count=locked.expected_photo_count,
+                    expected_document_count=locked.expected_document_count,
+                ):
                     locked.status = "completed"
                     locked.completed_submission = recovered
                     locked.save(update_fields=["status", "completed_submission", "updated_at"])
@@ -891,6 +943,39 @@ def _student_photo(student):
         return None
 
 
+class ExportFileError(OSError):
+    """A source file could not be copied completely into the export staging area."""
+
+
+def _stage_export_file(file_field, *, expected_size=None, expected_sha256=""):
+    """Read a source fully before it is allowed to become a ZIP member."""
+    Path(settings.EXPORT_TEMP_DIR).mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="student-export-source-", dir=settings.EXPORT_TEMP_DIR)
+    os.close(fd)
+    temp_path = Path(temp_name)
+    total = 0
+    digest = hashlib.sha256()
+    try:
+        with file_field.open("rb") as source, temp_path.open("wb") as target:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+                digest.update(chunk)
+                total += len(chunk)
+        if expected_size is not None and total != expected_size:
+            raise ExportFileError(f"文件大小不一致：期望 {expected_size}，实际 {total}")
+        if expected_sha256 and not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+            raise ExportFileError("文件 SHA256 不一致")
+        return temp_path
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        temp_path.unlink(missing_ok=True)
+        if isinstance(exc, ExportFileError):
+            raise
+        raise ExportFileError(str(exc)) from exc
+
+
 def export_students_to_tempfile(filters, actor=None, ip_address=None):
     qs = Student.objects.select_related("submission", "school_year").filter(submission__status="approved")
     for key in ["school_year__name", "department", "grade", "class_name", "gender", "study_type"]:
@@ -960,15 +1045,22 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                         photo = _student_photo(student)
                         if student.match_status == "matched" and photo is not None:
                             candidate_name = render_filename(student, rule, used)
+                            staged_photo = None
                             try:
-                                with photo.file.open("rb") as source, archive.open(f"{category_dir}/学生照片/{candidate_name}", "w") as target:
-                                    shutil.copyfileobj(source, target, length=1024 * 1024)
-                            except (FileNotFoundError, OSError, ValueError) as exc:
+                                staged_photo = _stage_export_file(photo.file, expected_size=photo.size, expected_sha256=photo.sha256)
+                            except ExportFileError as exc:
                                 student._export_status = "文件缺失"
                                 photo_anomalies.append(("文件缺失", student.name, f"照片无法读取：{photo.file.name}；{exc}"))
                             else:
+                                # Only write a ZIP member after the entire source has been read and verified.
+                                # An archive I/O error aborts and removes the whole temporary ZIP; it must not
+                                # be downgraded to a successful-looking truncated member.
+                                archive.write(staged_photo, f"{category_dir}/学生照片/{candidate_name}")
                                 student._export_name = candidate_name
                                 student._export_status = "已导出"
+                            finally:
+                                if staged_photo is not None:
+                                    staged_photo.unlink(missing_ok=True)
                         else:
                             photo_anomalies.append((student.get_match_status_display(), student.name, "没有可导出的已匹配照片"))
                     archive.writestr(f"{category_dir}/学生统计表.xlsx", _write_workbook(category_students, f"{category_dir}", photo_anomalies + class_file_anomalies))

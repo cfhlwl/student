@@ -4,7 +4,7 @@
 
 ## 当前 Git 证据
 
-- 项目目录：`E:\cfyz\student-collector-v1`
+- 项目目录：`E:\cfyz\student-collector-v1-r2`
 - Git SHA：以交付时 `git rev-parse HEAD` 输出为准（本报告不自引用提交哈希）
 - GitHub Actions：未启动
 - 父目录 `cfyz`、EasyPrinter 和现有生产数据库/服务：未访问、未修改
@@ -141,4 +141,39 @@
 | Docker 重启持久化 | 0，重启后读取 `Submission=12, Student=235, StudentPhoto=235` |
 
 真实 HTTP 矩阵还核对了每个并发班级的 20 条学生、20 条照片、名单文件大小和照片 `StudentPhoto.sha256`；混合班级核对了名单、15 条照片和 1 条文档的磁盘内容。全校导出目录按走读、半走读、住宿分层，ZIP 可解压且统计 Excel 数值单元格保持为整数。
+
+## R2-FINAL 最终定点整改（审查评论 ID 6603798119）
+
+本轮只处理 R2-F6、R2-F7，并补做 100 张×约 3MB 的隔离 Docker+Nginx 实际验收；没有修改 R3 事项、生产环境或 GitHub Actions。
+
+### RED 复现
+
+- R2-F6：`finalizing` 会话只要找到同一稳定凭证的 `Submission` 就可返回成功；构造仅有 Submission/Student、无名单/照片记录，以及已有部分照片的半成品，均可能虚报完成。另构造完成标记异常和双 `/complete/` 竞争场景。
+- R2-F7：标准库最小复现证明在 ZIP `archive.open(..., "w")` 内读源文件中途失败时，关闭 ZIP 仍可能留下 CRC 合法但内容截断的成员；原实现只写异常表，未回滚该成员。
+
+### 修复
+
+1. `UploadSession` 增加 `expected_student_count` 并迁移；最终化恢复只在名单、学生数、照片数、文档数、物理文件、照片大小/SHA256、学生关联和 `public_submit` 审计记录全部完整时才标记 `completed`。新鲜的 `finalizing` 半成品只返回可重试错误，过期后才允许安全回到 `pending`，重试仍保持稳定结果凭证且只生成一个 Submission。清理半成品时保护仍被上传会话引用的 staged 文件，避免恢复时误删输入。
+2. 导出照片先复制到受控临时文件并校验大小/SHA256，再写入 ZIP；源读取失败只进入异常工作表，不产生照片成员；ZIP 写入本身发生 I/O 错误则整包删除，不把截断成员作为成功结果。成功计数仍来自实际写入的完整照片。
+
+### RED→GREEN 测试证据
+
+| 验收项 | 退出码 / 结果 |
+|---|---:|
+| F6/F7 定向测试（含 finalizing 无照片、finalizing 部分照片、过期恢复、双 complete、导出源读失败） | 0，5 passed，约 1.62 秒 |
+| Docker 全量自动化回归 | 0，51 passed，37.46 秒 |
+| Docker + Nginx 原有 R2 真实矩阵 | 0，`HTTP_R2_FINAL_OK mixed=15+20MB-doc concurrent_classes=10 concurrent_photos=200 total_photos=215 zip_bytes=50687707` |
+| 100×约3MB 单会话 Docker + Nginx | 0，`HTTP_R2_100X3_OK photos=100 batches=12 db_photos=100 media_photo_files=100 zip_photos=100 zip_bytes=335109954 elapsed_seconds=85.43 client_maxrss_kb=870940 media_bytes=339126137` |
+| 100×3MB 失败批次与重复请求 | 0，批次 1 的错误凭证请求返回 400；随后同批有效重试和重复提交均成功且无重复记录 |
+| 100×3MB ZIP 完整性 | 0，100 张照片逐张字节/SHA256/CRC 校验；三类目录与分类统计表合计人数、成功照片数、缺失数分别为 100、100、0 |
+| 100×3MB 管理员审核 | 0，审核后唯一采用提交，数据库照片记录 100 条 |
+| 100×3MB 私有磁盘 | 0，最终照片目录恰好 100 个文件；媒体目录占用 339,126,137 字节 |
+
+100×3MB 测试的 JPEG 实际每张约 2.8–4.2MB，均为不同可校验内容；总响应 ZIP 约 335MB。测试期间 Docker 观测到 web 容器约 526–807MiB（测试客户端与 Gunicorn 同容器，`client_maxrss` 870,940KB；导出完成后服务容器回落到约 108MiB），Nginx 使用临时文件缓冲大响应，未出现 413/500。测试数据随后已从隔离环境清理。
+
+### 本轮最终自审
+
+- 保留管理员“清空全部采集资料”功能及数据库/媒体配套删除逻辑。
+- 未修改现有 EasyPrinter、cfyz 生产服务或生产数据库；未部署、未合并、未触发 GitHub Actions。
+- 当前仍等待 ChatGPT 独立复审，`MERGE=HOLD_FOR_CHATGPT`、`DEPLOY=NO`、`R3=WAIT_R2_FINAL_PASS`。
 

@@ -141,6 +141,7 @@ class UploadSession(models.Model):
     roster_sha256 = models.CharField(max_length=64, blank=True)
     roster_fingerprint = models.CharField(max_length=255, blank=True)
     note = models.CharField(max_length=500, blank=True)
+    expected_student_count = models.PositiveIntegerField(default=0)
     expected_photo_count = models.PositiveIntegerField(default=0)
     expected_document_count = models.PositiveIntegerField(default=0)
     photo_manifest = models.JSONField(default=list, blank=True)

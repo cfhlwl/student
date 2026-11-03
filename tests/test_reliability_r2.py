@@ -6,12 +6,14 @@ import re
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 import pytest
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.urls import reverse
+from django.utils import timezone
 from openpyxl import load_workbook
 from PIL import Image
 
@@ -387,6 +389,153 @@ def test_finalize_removes_partial_submission_and_orphan_tree_before_retry(settin
     assert not Submission.objects.filter(pk=partial.id).exists()
     assert not orphan.exists()
     assert UploadSession.objects.get(pk=session.id).status == "completed"
+
+
+def _finalizing_partial_session(client, name="finalizing半成品"):
+    photo = photo_file(name + ".jpg")
+    photo_data = photo.read()
+    photo.seek(0)
+    manifest = [{"name": photo.name, "size": len(photo_data), "sha256": hashlib.sha256(photo_data).hexdigest()}]
+    response = client.post(
+        reverse("upload-start"),
+        data={"roster": roster_file([[name, "男", "高中部", "2026", "高一", "F6", "走读", ""]]), "expected_photo_count": "1", "photo_manifest": json.dumps(manifest, ensure_ascii=False)},
+    )
+    assert response.status_code == 200, response.content
+    state = response.json()
+    batch = client.post(
+        reverse("upload-photo-batch", args=[state["upload_id"]]),
+        data={"batch_no": "0", "upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"], "photos": [photo_file(name + ".jpg")]},
+    )
+    assert batch.status_code == 200, batch.content
+    session = UploadSession.objects.get(pk=state["upload_id"])
+    session.status = "finalizing"
+    session.save(update_fields=["status", "updated_at"])
+    return session, state
+
+
+def test_finalizing_partial_submission_never_returns_success(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    session, state = _finalizing_partial_session(Client(), "finalizing仅学生")
+    with session.roster_file.open("rb") as source:
+        records = services.parse_roster(SimpleUploadedFile("名单.xlsx", source.read(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+    school_year, class_group = services._class_from_record(records[0])
+    partial = Submission.objects.create(
+        access_token_hash=hashlib.sha256(services._session_result_token(session.id).encode()).hexdigest(),
+        department=class_group.department, school_year=school_year, grade=class_group.grade,
+        class_group=class_group, source_filename="半成品.xlsx",
+    )
+    Student.objects.create(
+        submission=partial, name=records[0]["姓名"], gender="男", department=class_group.department,
+        school_year=school_year, grade=class_group.grade, class_name=records[0]["班级"], study_type="走读",
+    )
+    with pytest.raises(ValidationError, match="正在完成"):
+        services.finalize_upload_session(session_id=session.id, token=state["upload_token"], manifest_digest=session.photo_manifest_digest)
+    assert UploadSession.objects.get(pk=session.id).status == "finalizing"
+    assert Submission.objects.filter(pk=partial.id).exists()
+
+
+def test_finalizing_submission_with_partial_photo_never_returns_success(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    session, state = _finalizing_partial_session(Client(), "finalizing部分照片")
+    with session.roster_file.open("rb") as source:
+        records = services.parse_roster(SimpleUploadedFile("名单.xlsx", source.read(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+    school_year, class_group = services._class_from_record(records[0])
+    partial = Submission.objects.create(
+        access_token_hash=hashlib.sha256(services._session_result_token(session.id).encode()).hexdigest(),
+        department=class_group.department, school_year=school_year, grade=class_group.grade,
+        class_group=class_group, source_filename="半成品照片.xlsx",
+    )
+    student = Student.objects.create(
+        submission=partial, name=records[0]["姓名"], gender="男", department=class_group.department,
+        school_year=school_year, grade=class_group.grade, class_name=records[0]["班级"], study_type="走读",
+    )
+    staged = StagedUpload.objects.filter(batch__session=session, batch__kind="photo").get()
+    StudentPhoto.objects.create(student=student, submission=partial, original_name=staged.original_name, file=staged.file.name, content_type=staged.content_type, size=staged.size, sha256=staged.sha256)
+    with pytest.raises(ValidationError, match="正在完成"):
+        services.finalize_upload_session(session_id=session.id, token=state["upload_token"], manifest_digest=session.photo_manifest_digest)
+    assert UploadSession.objects.get(pk=session.id).status == "finalizing"
+    assert StudentPhoto.objects.filter(submission=partial).count() == 1
+
+
+def test_finalizing_stale_partial_submission_recovers_without_duplicate(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    session, state = _finalizing_partial_session(Client(), "finalizing过期")
+    with session.roster_file.open("rb") as source:
+        records = services.parse_roster(SimpleUploadedFile("名单.xlsx", source.read(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+    school_year, class_group = services._class_from_record(records[0])
+    partial = Submission.objects.create(
+        access_token_hash=hashlib.sha256(services._session_result_token(session.id).encode()).hexdigest(),
+        department=class_group.department, school_year=school_year, grade=class_group.grade,
+        class_group=class_group, source_filename="半成品.xlsx",
+    )
+    session.updated_at = timezone.now() - timedelta(seconds=3600)
+    UploadSession.objects.filter(pk=session.pk).update(status="finalizing", updated_at=session.updated_at)
+    recovered, _ = services.finalize_upload_session(session_id=session.id, token=state["upload_token"], manifest_digest=session.photo_manifest_digest)
+    assert recovered.id != partial.id
+    assert not Submission.objects.filter(pk=partial.id).exists()
+    assert recovered.students.count() == 1
+    assert recovered.photos.count() == 1
+    assert Submission.objects.filter(access_token_hash=hashlib.sha256(services._session_result_token(session.id).encode()).hexdigest()).count() == 1
+
+
+def test_two_complete_requests_share_one_result_or_retry_safely(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    client = Client()
+    photo = photo_file("双完成.jpg")
+    photo_data = photo.read()
+    photo.seek(0)
+    response = client.post(reverse("upload-start"), data={"roster": roster_file([["双完成", "女", "高中部", "2026", "高一", "F6-双", "住宿", ""]]), "expected_photo_count": "1", "photo_manifest": json.dumps([{"name": photo.name, "size": len(photo_data), "sha256": hashlib.sha256(photo_data).hexdigest()}])})
+    assert response.status_code == 200, response.content
+    state = response.json()
+    photo.seek(0)
+    assert client.post(reverse("upload-photo-batch", args=[state["upload_id"]]), data={"batch_no": "0", "upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"], "photos": [photo_file("双完成.jpg")] }).status_code == 200
+
+    def complete_once():
+        from django.db import close_old_connections
+        close_old_connections()
+        try:
+            result = services.finalize_upload_session(session_id=state["upload_id"], token=state["upload_token"], manifest_digest=state["photo_manifest_digest"])
+            return ("ok", str(result[0].id), result[1])
+        except ValidationError as exc:
+            return ("retry", str(exc), "")
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: complete_once(), range(2)))
+    assert {item[0] for item in results} <= {"ok", "retry"}
+    assert any(item[0] == "ok" for item in results)
+    assert Submission.objects.count() == 1
+    assert UploadSession.objects.get(pk=state["upload_id"]).status == "completed"
+
+
+def test_export_source_read_failure_has_no_partial_photo_member(settings, tmp_path, monkeypatch):
+    settings.MEDIA_ROOT = tmp_path
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    submission = complete_submission([["导出失败", "男", "高中部", "2026", "高一", "F7", "走读", ""]], [photo_file("导出失败.jpg")])
+    admin = User.objects.create(username="r2-f7")
+    review_submission_version(submission_id=submission.id, action="approved", actor=admin)
+    original_stage = services._stage_export_file
+
+    def fail_after_first_chunk(file_field, **kwargs):
+        staged = original_stage(file_field, **kwargs)
+        staged.write_bytes(staged.read_bytes()[:1])
+        staged.unlink(missing_ok=True)
+        raise services.ExportFileError("模拟源文件在首块后读取失败")
+
+    monkeypatch.setattr(services, "_stage_export_file", fail_after_first_chunk)
+    temp_path, _, _ = export_students_to_tempfile({"school_year__name": "2026"}, actor=admin)
+    try:
+        with zipfile.ZipFile(temp_path) as archive:
+            assert archive.testzip() is None
+            assert not [name for name in archive.namelist() if name.lower().endswith(".jpg")]
+            stats = next(name for name in archive.namelist() if name.endswith("学生统计表.xlsx"))
+            book = load_workbook(io.BytesIO(archive.read(stats)), data_only=True)
+            assert book["统计汇总"]["B8"].value == 0
+            assert book["统计汇总"]["B9"].value == 1
+            assert any("读取失败" in str(row[2].value or "") for row in book["异常记录"].iter_rows(min_row=2))
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def test_study_type_contract_has_no_non_boarding_value():
