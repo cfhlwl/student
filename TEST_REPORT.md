@@ -25,7 +25,7 @@
 | 迁移漂移检查 | `docker compose run --rm -v "${PWD}:/app" web python manage.py makemigrations --check --dry-run` | 0，无变化 |
 | Compose 配置 | `docker compose config` | 0 |
 | Docker 镜像构建 | `docker compose build web` | 0 |
-| R1 可靠性测试 | `docker compose run --rm -v "${PWD}:/app" web pytest -q -s tests/test_reliability_r1.py` | 0，11 passed；300 张导出 1.205 秒，tracemalloc 峰值 3,586,195 bytes |
+| R1 可靠性测试 | `docker compose run --rm -v "${PWD}:/app" web pytest -q -s tests/test_reliability_r1.py` | 0，11 passed；300 张导出 1.045 秒，tracemalloc 峰值 3,759,184 bytes |
 | Docker + Nginx 真 HTTP | `R1_BASE_URL=http://nginx R1_ADMIN_PASSWORD=*** python tests/http_r1.py` | 0，`HTTP_R1_OK photos=50` |
 | Compose 配置 | `docker compose config` | 0 |
 | Docker 镜像构建 | `docker build -t student-collector-v1:local .` | 0 |
