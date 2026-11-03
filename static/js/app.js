@@ -1,8 +1,15 @@
 document.addEventListener('DOMContentLoaded', function () {
-  document.querySelectorAll('input[type=file][multiple]').forEach(function (input) {
+  document.querySelectorAll('input[type=file]').forEach(function (input) {
     input.addEventListener('change', function () {
       const target = document.querySelector('[data-file-count="' + input.name + '"]');
-      if (target) target.textContent = input.files.length ? '已选择 ' + input.files.length + ' 个文件' : '';
+      if (!target) return;
+      if (!input.files.length) {
+        target.textContent = '';
+      } else if (input.multiple) {
+        target.textContent = '已选择 ' + input.files.length + ' 个文件';
+      } else {
+        target.textContent = '已选择：' + input.files[0].name;
+      }
     });
   });
   const submitForm = document.getElementById('submit-form');

@@ -70,6 +70,7 @@ LOGIN_REDIRECT_URL = "/admin/"
 LOGOUT_REDIRECT_URL = "/admin/login/"
 
 SITE_NAME = os.getenv("SITE_NAME", "赤峰一中学生资料采集")
+SITE_URL = os.getenv("SITE_URL", "").rstrip("/")
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
 MAX_PHOTOS_PER_SUBMISSION = int(os.getenv("MAX_PHOTOS_PER_SUBMISSION", "300"))
 MAX_DOCUMENTS_PER_SUBMISSION = int(os.getenv("MAX_DOCUMENTS_PER_SUBMISSION", "10"))

@@ -35,7 +35,7 @@ Copy-Item .env.example .env
 
 ## Docker 部署
 
-1. 复制 `.env.example` 为 `.env`，填入长随机密钥、正式域名和 `DJANGO_ALLOWED_HOSTS`；不要把真实 `.env` 提交到 Git。
+1. 复制 `.env.example` 为 `.env`，填入长随机密钥、正式域名、`SITE_URL` 和 `DJANGO_ALLOWED_HOSTS`；不要把真实 `.env` 提交到 Git。
 2. 先准备持久化目录：`data/` 保存 SQLite，`media/` 保存私有原始文件。
 3. 执行：
 
@@ -44,7 +44,7 @@ docker compose up -d --build
 docker compose exec web python manage.py create_admin admin
 ```
 
-示例 Compose 暴露 `8080`，生产 Nginx/网关应终止 HTTPS 并转发到该端口。部署后检查 `/submit`、`/admin/login/`，确认没有公开 `/media/` 路由。
+示例 Compose 暴露 `8080`，生产 Nginx/网关应终止 HTTPS 并转发到该端口；`SITE_URL` 用于生成提交结果链接，必须填写实际访问地址。部署后检查 `/submit`、`/admin/login/`，确认没有公开 `/media/` 路由。
 
 如果只是内网 IP 验收，可将 `.env` 中 `HTTPS_ENABLED=0`，并把 `CSRF_TRUSTED_ORIGINS` 设置为 `http://192.168.88.99:8080`；正式生产必须恢复 `HTTPS_ENABLED=1` 并通过 HTTPS 访问。
 

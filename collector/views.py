@@ -2,6 +2,7 @@ import hashlib
 import json
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.views import LoginView, LogoutView
 from django.contrib.auth.decorators import user_passes_test
@@ -40,7 +41,9 @@ def public_submit(request):
                     message += "；" + "；".join(f"第 {item['row']} 行：{','.join(item['errors'])}" for item in exc.errors[:8])
                 form.add_error(None, message)
             else:
-                return render(request, "collector/submit_success.html", {"submission": submission, "token": token, "matched_count": submission.students.filter(match_status="matched").count(), "missing_count": submission.students.exclude(match_status="matched").count(), "result_url": request.build_absolute_uri(reverse("submit-result", args=[submission.id]))})
+                result_path = reverse("submit-result", args=[submission.id])
+                result_url = f"{settings.SITE_URL}{result_path}" if settings.SITE_URL else request.build_absolute_uri(result_path)
+                return render(request, "collector/submit_success.html", {"submission": submission, "token": token, "matched_count": submission.students.filter(match_status="matched").count(), "missing_count": submission.students.exclude(match_status="matched").count(), "result_url": result_url})
     else:
         form = SubmissionForm()
     return render(request, "collector/submit.html", {"form": form})
