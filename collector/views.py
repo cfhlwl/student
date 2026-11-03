@@ -14,7 +14,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument
-from .services import ValidationError, create_submission, export_students, template_bytes, validate_naming_rule
+from .services import ValidationError, clear_rejected_submissions, create_submission, export_students, template_bytes, validate_naming_rule
 
 
 def client_ip(request):
@@ -94,6 +94,7 @@ def admin_dashboard(request):
     context = {
         "student_count": students.count(), "photo_count": students.filter(match_status="matched").count(),
         "missing_count": students.exclude(match_status="matched").count(), "pending_count": Submission.objects.filter(status="pending").count(),
+        "rejected_count": Submission.objects.filter(status="rejected").count(),
         "class_stats": class_stats, "upload_open": AppSetting.get_bool("public_upload_open", True),
     }
     return render(request, "collector/admin_dashboard.html", context)
@@ -135,13 +136,13 @@ def admin_students(request):
         qs = qs.filter(**filters)
         if form.cleaned_data.get("has_photo") == "yes": qs = qs.filter(match_status="matched")
         if form.cleaned_data.get("has_photo") == "no": qs = qs.exclude(match_status="matched")
-    return render(request, "collector/admin_students.html", {"students": qs, "form": form, "filters_json": json.dumps(filters, ensure_ascii=False), "unmatched_photos": StudentPhoto.objects.filter(student__isnull=True).select_related("submission")})
+    return render(request, "collector/admin_students.html", {"students": qs, "form": form, "filters_json": json.dumps(filters, ensure_ascii=False), "unmatched_photos": StudentPhoto.objects.filter(student__isnull=True, submission__status__in=["pending", "approved"]).select_related("submission")})
 
 
 @require_POST
 @staff_required
 def manual_match(request, photo_id):
-    photo = get_object_or_404(StudentPhoto, id=photo_id, student__isnull=True)
+    photo = get_object_or_404(StudentPhoto, id=photo_id, student__isnull=True, submission__status__in=["pending", "approved"])
     student = get_object_or_404(Student, id=request.POST.get("student_id"), submission=photo.submission)
     if StudentPhoto.objects.filter(student=student).exists():
         messages.error(request, "该学生已有照片，不能覆盖原照片。")
@@ -217,6 +218,14 @@ def toggle_upload(request):
     AppSetting.set_value("public_upload_open", not current)
     AuditLog.objects.create(actor=request.user, action="toggle_public_upload", detail={"open": not current}, ip_address=client_ip(request))
     messages.success(request, "公开上传已" + ("开启" if not current else "关闭") + "。")
+    return redirect("admin-dashboard")
+
+
+@require_POST
+@staff_required
+def clear_test_data(request):
+    submissions, students, files = clear_rejected_submissions(actor=request.user, ip_address=client_ip(request))
+    messages.success(request, f"已清除 {submissions} 个退回/测试提交、{students} 条学生记录和 {files} 个私有文件；已采用数据未受影响。")
     return redirect("admin-dashboard")
 
 

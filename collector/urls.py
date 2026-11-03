@@ -2,7 +2,7 @@ from django.urls import path
 
 from .views import (
     StaffLoginView, StaffLogoutView, admin_classes, admin_dashboard, admin_naming, admin_students,
-    admin_submissions, download_template, export_zip, manual_match, protected_document, protected_photo, public_submit, review_submission, submit_result, toggle_upload,
+    admin_submissions, clear_test_data, download_template, export_zip, manual_match, protected_document, protected_photo, public_submit, review_submission, submit_result, toggle_upload,
 )
 
 urlpatterns = [
@@ -22,5 +22,6 @@ urlpatterns = [
     path("admin/naming/", admin_naming, name="admin-naming"),
     path("admin/classes/", admin_classes, name="admin-classes"),
     path("admin/settings/upload/", toggle_upload, name="toggle-upload"),
+    path("admin/settings/clear-test-data/", clear_test_data, name="clear-test-data"),
 ]
 

@@ -351,6 +351,21 @@ def export_students(filters, actor=None, ip_address=None):
     return root.getvalue(), len(students), [getattr(s, "_export_name", "") for s in students[:10]]
 
 
+@transaction.atomic
+def clear_rejected_submissions(actor=None, ip_address=None):
+    submissions = list(Submission.objects.filter(status="rejected").prefetch_related("photos", "documents"))
+    removed_students = 0
+    removed_files = 0
+    for submission in submissions:
+        removed_students += submission.students.count()
+        for obj in list(submission.photos.all()) + list(submission.documents.all()):
+            obj.file.delete(save=False)
+            removed_files += 1
+        submission.delete()
+    AuditLog.objects.create(actor=actor, action="clear_rejected_submissions", detail={"submissions": len(submissions), "students": removed_students, "files": removed_files}, ip_address=ip_address)
+    return len(submissions), removed_students, removed_files
+
+
 def template_bytes():
     book = Workbook()
     sheet = book.active

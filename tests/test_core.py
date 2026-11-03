@@ -9,7 +9,7 @@ from openpyxl import Workbook, load_workbook
 from PIL import Image
 
 from collector.models import AppSetting, Student, StudentPhoto, Submission
-from collector.services import ValidationError, create_submission, export_students, template_bytes
+from collector.services import ValidationError, clear_rejected_submissions, create_submission, export_students, template_bytes
 
 
 def excel_upload(rows):
@@ -108,6 +108,21 @@ def test_configured_collection_scope_rejects_unlisted_class():
             create_submission(roster_upload=excel_upload(rows), photo_uploads=[], document_uploads=[])
     finally:
         AppSetting.set_value("collection_scope", "all")
+
+
+@pytest.mark.django_db
+def test_clear_rejected_submissions_removes_files_but_keeps_approved(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    rows = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "A-001.jpg", ""]]
+    rejected, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[image_upload("A-001.jpg")], document_uploads=[])
+    rejected.status = "rejected"; rejected.save(update_fields=["status"])
+    approved, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[], document_uploads=[])
+    approved.status = "approved"; approved.save(update_fields=["status"])
+    result = clear_rejected_submissions()
+    assert result[0:2] == (1, 1)
+    assert Submission.objects.filter(id=rejected.id).exists() is False
+    assert Submission.objects.filter(id=approved.id).exists() is True
+    assert StudentPhoto.objects.filter(submission=rejected.id).exists() is False
 
 
 @pytest.mark.django_db
