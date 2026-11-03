@@ -176,7 +176,9 @@ def protected_document(request, document_id):
 @require_GET
 @staff_required
 def export_zip(request):
-    form = ExportFilterForm(request.GET or None)
+    # An empty query string still means "export all adopted data". Passing
+    # None creates an unbound form, whose is_valid() is always False.
+    form = ExportFilterForm(request.GET)
     if not form.is_valid():
         return JsonResponse({"errors": form.errors}, status=400)
     filters = filter_values(form)

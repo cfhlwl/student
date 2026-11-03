@@ -93,6 +93,16 @@ def test_public_result_requires_token_and_staff_boundary(client):
 
 
 @pytest.mark.django_db
+def test_export_zip_without_filters_returns_zip(client):
+    admin = User.objects.create_user(username="export-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    response = client.get(reverse("export-zip"))
+    assert response.status_code == 200
+    assert response["Content-Type"] == "application/zip"
+    assert response.content[:2] == b"PK"
+
+
+@pytest.mark.django_db
 def test_upload_gate_closes_public_entry(client):
     AppSetting.set_value("public_upload_open", False)
     response = client.get(reverse("submit"))
