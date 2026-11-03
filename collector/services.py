@@ -651,10 +651,13 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
     roster_sha256 = upload_sha256(roster_upload)
     idempotency_key = str(idempotency_key or "")[:64]
     token = hmac.new(settings.SECRET_KEY.encode("utf-8"), f"student-collector-upload:{idempotency_key}".encode("utf-8"), hashlib.sha256).hexdigest() if idempotency_key else UploadSession.make_token()
+    roster_original_name = _safe_upload_name(roster_upload)
+    photo_manifest_digest = _manifest_json_digest(normalized_manifest)
+    document_manifest_digest = _manifest_json_digest(normalized_document_manifest)
     def create_session():
         defaults = {
             "access_token_hash": hashlib.sha256(token.encode()).hexdigest(),
-            "roster_original_name": _safe_upload_name(roster_upload),
+            "roster_original_name": roster_original_name,
             "roster_sha256": roster_sha256,
             "roster_fingerprint": str(roster_fingerprint or "")[:255],
             "note": note[:500],
@@ -662,9 +665,9 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
             "expected_photo_count": expected_photo_count,
             "expected_document_count": expected_document_count,
             "photo_manifest": normalized_manifest,
-            "photo_manifest_digest": _manifest_json_digest(normalized_manifest),
+            "photo_manifest_digest": photo_manifest_digest,
             "document_manifest": normalized_document_manifest,
-            "document_manifest_digest": _manifest_json_digest(normalized_document_manifest),
+            "document_manifest_digest": document_manifest_digest,
         }
         if idempotency_key:
             session, created = UploadSession.objects.get_or_create(start_idempotency_key=idempotency_key, defaults=defaults)
@@ -678,17 +681,27 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         session = _with_db_retry(lambda: UploadSession.objects.get(start_idempotency_key=idempotency_key))
         created = False
     if not created:
+        if session.status not in {"pending", "finalizing", "completed"}:
+            raise ValidationError("原上传会话状态不可恢复，请重新提交")
         if session.expected_photo_count != expected_photo_count or session.expected_document_count != expected_document_count:
             raise ValidationError("上传会话与当前文件清单不一致，请重新选择文件")
-        if session.photo_manifest_digest != _manifest_json_digest(normalized_manifest) or session.document_manifest_digest != _manifest_json_digest(normalized_document_manifest):
+        if (
+            session.access_token_hash != hashlib.sha256(token.encode()).hexdigest()
+            or session.roster_sha256 != roster_sha256
+            or session.roster_original_name != roster_original_name
+            or session.roster_fingerprint != str(roster_fingerprint or "")[:255]
+            or session.note != note[:500]
+            or session.photo_manifest_digest != photo_manifest_digest
+            or session.document_manifest_digest != document_manifest_digest
+        ):
             raise ValidationError("上传会话与当前文件清单不一致，请重新选择文件")
         if not session.roster_file.name:
-            stored_roster = default_storage.save(f"upload_sessions/{session.id}/roster/{_safe_upload_name(roster_upload)}", roster_upload)
+            stored_roster = default_storage.save(f"upload_sessions/{session.id}/roster/{roster_original_name}", roster_upload)
             _with_db_retry(lambda: UploadSession.objects.filter(pk=session.pk).update(roster_file=stored_roster))
         return session, token, session.expected_student_count
     stored_names = []
     try:
-        roster_name = default_storage.save(f"upload_sessions/{session.id}/roster/{_safe_upload_name(roster_upload)}", roster_upload)
+        roster_name = default_storage.save(f"upload_sessions/{session.id}/roster/{roster_original_name}", roster_upload)
         stored_names.append(roster_name)
         _with_db_retry(lambda: UploadSession.objects.filter(pk=session.pk).update(roster_file=roster_name))
         if documents:
@@ -924,6 +937,45 @@ def create_photo_supplement(*, submission_id, token, photo_uploads, note="", ip_
         raise
 
 
+def match_supplement_photo(*, photo_id, student_id=None, actor=None, ip_address=None):
+    """Bind, change, or clear one pending supplement photo without changing its file."""
+    def operation():
+        with transaction.atomic():
+            photo = SupplementPhoto.objects.select_related("supplement").get(pk=photo_id)
+            supplement = PhotoSupplement.objects.select_for_update().get(pk=photo.supplement_id)
+            if supplement.status != "pending":
+                raise ValidationError("补传已经审核，不能再修改绑定")
+            photo = SupplementPhoto.objects.select_for_update().get(pk=photo_id)
+            previous_student_id = photo.student_id
+            student = None
+            if student_id:
+                try:
+                    student = Student.objects.get(pk=student_id, submission_id=supplement.submission_id)
+                except Student.DoesNotExist as exc:
+                    raise ValidationError("只能绑定当前提交版本中的学生") from exc
+                if StudentPhoto.objects.filter(student_id=student.id).exists():
+                    raise ValidationError("该学生已有照片，不能覆盖原照片")
+                if SupplementPhoto.objects.filter(supplement=supplement, student_id=student.id).exclude(pk=photo.pk).exists():
+                    raise ValidationError("同一补传中已有其他照片绑定该学生")
+                photo.student = student
+                photo.match_status = "matched"
+            else:
+                photo.student = None
+                photo.match_status = "ambiguous"
+            photo.save(update_fields=["student", "match_status"])
+            AuditLog.objects.create(
+                actor=actor,
+                action="manual_supplement_photo_match" if student else "manual_supplement_photo_unmatch",
+                target_type="SupplementPhoto",
+                target_id=str(photo.id),
+                detail={"supplement_id": str(supplement.id), "previous_student_id": previous_student_id, "student_id": photo.student_id},
+                ip_address=ip_address,
+            )
+            return photo
+
+    return _with_db_retry(operation)
+
+
 def review_photo_supplement(*, supplement_id, action, actor, ip_address=None):
     if action not in {"approved", "rejected"}:
         raise ValidationError("补传审核操作不正确")
@@ -933,15 +985,30 @@ def review_photo_supplement(*, supplement_id, action, actor, ip_address=None):
             supplement = PhotoSupplement.objects.select_for_update().select_related("submission").get(pk=supplement_id)
             if supplement.status != "pending":
                 raise ValidationError("补传已审核")
+            submission = Submission.objects.select_for_update().get(pk=supplement.submission_id)
+            if action == "approved":
+                current = Submission.objects.filter(class_group_id=submission.class_group_id, status="approved").first()
+                if submission.status != "approved" or current is None or current.pk != submission.pk:
+                    supplement.status = "expired"
+                    supplement.reviewed_at = timezone.now()
+                    supplement.reviewed_by = actor
+                    supplement.save(update_fields=["status", "reviewed_at", "reviewed_by"])
+                    AuditLog.objects.create(actor=actor, action="photo_supplement_expired", target_type="Submission", target_id=str(submission.id), detail={"supplement_id": str(supplement.id), "reason": "原提交版本已失效"}, ip_address=ip_address)
+                    return supplement
             photos = list(supplement.photos.select_related("student"))
             if action == "approved":
                 if any(photo.match_status != "matched" or photo.student_id is None for photo in photos):
                     raise ValidationError("仍有照片无法唯一匹配，请先人工绑定")
+                student_ids = [photo.student_id for photo in photos]
+                if len(student_ids) != len(set(student_ids)):
+                    raise ValidationError("同一补传中不能有两张照片绑定同一学生，请先纠正绑定")
+                if any(photo.student is None or photo.student.submission_id != submission.id for photo in photos):
+                    raise ValidationError("照片不能跨提交版本或班级绑定")
                 for photo in photos:
                     if StudentPhoto.objects.filter(student_id=photo.student_id).exists():
                         raise ValidationError("补传照片将覆盖已有照片，操作已拒绝")
                 for photo in photos:
-                    StudentPhoto.objects.create(student=photo.student, submission=supplement.submission, original_name=photo.original_name, file=photo.file.name, content_type=photo.content_type, size=photo.size, sha256=photo.sha256)
+                    StudentPhoto.objects.create(student=photo.student, submission=submission, original_name=photo.original_name, file=photo.file.name, content_type=photo.content_type, size=photo.size, sha256=photo.sha256)
                     photo.student.match_status = "matched"
                     photo.student.save(update_fields=["match_status"])
                 supplement.status = "approved"
@@ -954,9 +1021,9 @@ def review_photo_supplement(*, supplement_id, action, actor, ip_address=None):
             return supplement
 
     result = _with_db_retry(operation)
-    if result.status == "approved":
-        # The files are now referenced by StudentPhoto; keep them. Rejected files are private
-        # and can be removed after the audit transaction has completed.
+    if result.status in {"approved", "expired"}:
+        # Approved files are referenced by StudentPhoto; expired files remain
+        # available for audit and must not be mistaken for an active version.
         return result
     rejected_files = list(result.photos.values_list("file", flat=True))
     _delete_stored_files(rejected_files)

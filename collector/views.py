@@ -7,6 +7,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.views import LoginView, LogoutView
 from django.contrib.auth.decorators import user_passes_test
+from django.db import IntegrityError
 from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -16,7 +17,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
-from .services import ValidationError, clear_all_collection_data, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
+from .services import ValidationError, clear_all_collection_data, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 
 
 def client_ip(request):
@@ -148,24 +149,33 @@ def upload_complete(request, session_id):
     return JsonResponse({"submission_id": str(submission.id), "token": token, "result_url": f"{result_url}?token={token}"})
 
 
-@require_GET
+@require_POST
 def upload_status(request, session_id):
     try:
         data = upload_session_status(
             session_id=session_id,
-            token=request.GET.get("upload_token", ""),
-            manifest_digest=request.GET.get("manifest_digest"),
-            roster_fingerprint=request.GET.get("roster_fingerprint"),
+            token=request.POST.get("upload_token", ""),
+            manifest_digest=request.POST.get("manifest_digest"),
+            roster_fingerprint=request.POST.get("roster_fingerprint"),
         )
     except UploadSession.DoesNotExist:
-        return JsonResponse({"error": "上传会话不存在或已过期"}, status=404)
+        response = JsonResponse({"error": "上传会话不存在或已过期"}, status=404)
+        response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response["Pragma"] = "no-cache"
+        return response
     except ValidationError as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
+        response = JsonResponse({"error": str(exc)}, status=400)
+        response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response["Pragma"] = "no-cache"
+        return response
     if data.get("completed_submission_id") and data.get("result_token"):
         result_path = reverse("submit-result", args=[data["completed_submission_id"]])
         result_url = f"{settings.SITE_URL}{result_path}" if settings.SITE_URL else request.build_absolute_uri(result_path)
         data["result_url"] = f"{result_url}?token={data['result_token']}"
-    return JsonResponse(data)
+    response = JsonResponse(data)
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
 
 
 @require_GET
@@ -255,29 +265,33 @@ def admin_submissions(request):
 @staff_required
 def review_supplement(request, supplement_id):
     try:
-        review_photo_supplement(supplement_id=supplement_id, action=request.POST.get("action"), actor=request.user, ip_address=client_ip(request))
+        result = review_photo_supplement(supplement_id=supplement_id, action=request.POST.get("action"), actor=request.user, ip_address=client_ip(request))
     except PhotoSupplement.DoesNotExist:
         raise Http404
     except ValidationError as exc:
         messages.error(request, str(exc))
     else:
-        messages.success(request, "补传照片已" + ("采用" if request.POST.get("action") == "approved" else "退回") + "。")
+        if result.status == "expired":
+            messages.warning(request, "补传未采用：原提交版本已被新版本替代，照片保留供审计。")
+        else:
+            messages.success(request, "补传照片已" + ("采用" if request.POST.get("action") == "approved" else "退回") + "。")
     return redirect("admin-submissions")
 
 
 @require_POST
 @staff_required
 def manual_supplement_match(request, photo_id):
-    photo = get_object_or_404(SupplementPhoto, id=photo_id, student__isnull=True, supplement__status="pending")
-    student = get_object_or_404(Student, id=request.POST.get("student_id"), submission=photo.supplement.submission)
-    if StudentPhoto.objects.filter(student=student).exists():
-        messages.error(request, "该学生已有照片，不能覆盖原照片。")
+    try:
+        photo = match_supplement_photo(photo_id=photo_id, student_id=request.POST.get("student_id") or None, actor=request.user, ip_address=client_ip(request))
+    except SupplementPhoto.DoesNotExist:
+        raise Http404
+    except (ValidationError, IntegrityError) as exc:
+        messages.error(request, str(exc) or "绑定操作未完成，请刷新后重试。")
     else:
-        photo.student = student
-        photo.match_status = "matched"
-        photo.save(update_fields=["student", "match_status"])
-        AuditLog.objects.create(actor=request.user, action="manual_supplement_photo_match", target_type="Student", target_id=str(student.id), detail={"photo_id": photo.id, "supplement_id": str(photo.supplement_id)}, ip_address=client_ip(request))
-        messages.success(request, f"已将 {photo.original_name} 绑定到 {student.name}。")
+        if photo.student_id:
+            messages.success(request, f"已将 {photo.original_name} 绑定到 {photo.student.name}。")
+        else:
+            messages.success(request, f"已解除 {photo.original_name} 的人工绑定。")
     return redirect("admin-submissions")
 
 

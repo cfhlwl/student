@@ -61,6 +61,15 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       return sha256Pure(buffer);
     }
+    function randomNonce() {
+      const bytes = new Uint8Array(32);
+      if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(bytes);
+      } else {
+        for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256);
+      }
+      return Array.from(bytes).map(function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+    }
     async function buildPhotoManifest(files) {
       const manifest = [];
       for (const file of files) manifest.push({name: file.name, size: file.size, sha256: await fileFingerprint(file)});
@@ -88,8 +97,8 @@ document.addEventListener('DOMContentLoaded', function () {
     async function retryRequest(makeRequest, onProgress) { let lastError; for (let attempt = 1; attempt <= 3; attempt++) { try { return await makeRequest(onProgress); } catch (error) { lastError = error; if (attempt < 3) await sleep(attempt * 700); } } throw lastError; }
     function compareUploads(items, uploads) { return uploads.every(function (row, index) { const item = items[index]; return item && row.name === item.name && Number(row.size) === item.size && row.sha256 === item.sha256; }); }
     async function readStatus(state, photoManifest, documentManifest, rosterFingerprint, csrf) {
-      const query = new URLSearchParams({upload_token: state.token, manifest_digest: state.manifestDigest || '', roster_fingerprint: rosterFingerprint});
-      const status = await xhrJson(urlFor(submitForm.dataset.uploadStatus, state.id) + '?' + query.toString(), null, csrf, null, 'GET');
+      const statusData = new FormData(); statusData.append('upload_token', state.token); statusData.append('manifest_digest', state.manifestDigest || ''); statusData.append('roster_fingerprint', rosterFingerprint);
+      const status = await xhrJson(urlFor(submitForm.dataset.uploadStatus, state.id), statusData, csrf, null, 'POST');
       if (status.status === 'finalizing') throw new Error('服务器正在完成本次提交，请稍后刷新并重新选择文件');
       if (status.photo_manifest_digest !== state.manifestDigest || JSON.stringify(status.photo_manifest || []) !== JSON.stringify(photoManifest) || JSON.stringify(status.document_manifest || []) !== JSON.stringify(documentManifest)) throw new Error('Excel/照片/文档清单或内容已变化，请重新选择后提交');
       const batches = (status.batches || []).slice().sort(function (a, b) { return a.kind.localeCompare(b.kind) || a.sequence - b.sequence; });
@@ -108,18 +117,21 @@ document.addEventListener('DOMContentLoaded', function () {
       if (!rosterInput?.files[0]) throw new Error('请先选择 Excel 名单');
       const photoManifest = await buildPhotoManifest(files), documentManifest = await buildDocumentManifest(documents), rosterFingerprint = await fileFingerprint(rosterInput.files[0]);
       const inputKey = JSON.stringify({rosterFingerprint: rosterFingerprint, photoManifest: photoManifest, documentManifest: documentManifest});
-      const idempotencyKey = await textFingerprint(inputKey);
       let state = window.__studentUploadState;
       try { if (!state) state = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); } catch (error) { state = null; }
-      if (state && state.inputKey !== inputKey) { clearPersisted(); state = null; }
+      if (state && (state.inputKey !== inputKey || !state.idempotencyKey)) { clearPersisted(); state = null; }
+      if (!state) {
+        state = {id: null, token: '', photoIndex: 0, documentIndex: 0, photoBatchNo: 0, documentBatchNo: 0, inputKey: inputKey, idempotencyKey: randomNonce(), manifestDigest: '', rosterFingerprint: rosterFingerprint, failedBatch: null};
+        persist(state);
+      }
       submitButton.disabled = true; if (retryButton) retryButton.hidden = true; setProgress(2, '正在校验文件内容…');
-      if (state) {
+      if (state.id) {
         const status = await readStatus(state, photoManifest, documentManifest, rosterFingerprint, csrf);
         if (status.completed_submission_id && status.result_url) { window.location.href = status.result_url; return; }
       } else {
-        const startData = new FormData(); startData.append('roster', rosterInput.files[0], rosterInput.files[0].name); startData.append('expected_photo_count', String(files.length)); startData.append('expected_document_count', String(documents.length)); startData.append('photo_manifest', JSON.stringify(photoManifest)); startData.append('document_manifest', JSON.stringify(documentManifest)); startData.append('roster_fingerprint', rosterFingerprint); startData.append('idempotency_key', idempotencyKey); startData.append('note', submitForm.querySelector('[name=note]')?.value || '');
+        const startData = new FormData(); startData.append('roster', rosterInput.files[0], rosterInput.files[0].name); startData.append('expected_photo_count', String(files.length)); startData.append('expected_document_count', String(documents.length)); startData.append('photo_manifest', JSON.stringify(photoManifest)); startData.append('document_manifest', JSON.stringify(documentManifest)); startData.append('roster_fingerprint', rosterFingerprint); startData.append('idempotency_key', state.idempotencyKey); startData.append('note', submitForm.querySelector('[name=note]')?.value || '');
         const started = await retryRequest(function (onProgress) { return xhrJson(submitForm.dataset.uploadStart, startData, csrf, function (loaded, total) { setProgress(Math.round((loaded / total) * 5), '正在建立上传会话… ' + bytesText(loaded)); }); });
-        state = {id: started.upload_id, token: started.upload_token, photoIndex: 0, documentIndex: 0, photoBatchNo: 0, documentBatchNo: 0, inputKey: inputKey, manifestDigest: started.photo_manifest_digest, rosterFingerprint: rosterFingerprint, failedBatch: null}; persist(state);
+        state.id = started.upload_id; state.token = started.upload_token; state.manifestDigest = started.photo_manifest_digest; state.rosterFingerprint = rosterFingerprint; persist(state);
       }
       const totalBytes = (rosterInput.files[0]?.size || 0) + files.reduce(function (n, f) { return n + f.size; }, 0) + documents.reduce(function (n, f) { return n + f.size; }, 0);
       let confirmedBytes = (rosterInput.files[0]?.size || 0) + files.slice(0, state.photoIndex).reduce(function (n, f) { return n + f.size; }, 0) + documents.slice(0, state.documentIndex).reduce(function (n, f) { return n + f.size; }, 0);

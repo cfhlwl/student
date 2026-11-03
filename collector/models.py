@@ -112,7 +112,7 @@ def supplement_photo_path(instance, filename):
 
 
 class PhotoSupplement(models.Model):
-    STATUS_CHOICES = [("pending", "待管理员确认"), ("approved", "已采用"), ("rejected", "已退回")]
+    STATUS_CHOICES = [("pending", "待管理员确认"), ("approved", "已采用"), ("rejected", "已退回"), ("expired", "原提交已失效")]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     submission = models.ForeignKey("Submission", on_delete=models.CASCADE, related_name="photo_supplements")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="pending")
@@ -143,6 +143,15 @@ class SupplementPhoto(models.Model):
     sha256 = models.CharField(max_length=64)
     match_status = models.CharField(max_length=12, choices=MATCH_STATUSES, default="ambiguous")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supplement", "student"],
+                condition=Q(student__isnull=False),
+                name="unique_supplement_student_binding",
+            ),
+        ]
 
 
 class StudentPhoto(models.Model):
