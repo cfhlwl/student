@@ -136,6 +136,11 @@ class AppSetting(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     @classmethod
+    def get_value(cls, key, default=""):
+        obj = cls.objects.filter(key=key).first()
+        return default if obj is None else obj.value
+
+    @classmethod
     def get_bool(cls, key, default=False):
         obj = cls.objects.filter(key=key).first()
         return default if obj is None else obj.value.lower() in {"1", "true", "yes", "on"}

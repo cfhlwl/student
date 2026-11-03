@@ -100,6 +100,17 @@ def test_upload_gate_closes_public_entry(client):
 
 
 @pytest.mark.django_db
+def test_configured_collection_scope_rejects_unlisted_class():
+    AppSetting.set_value("collection_scope", "configured")
+    rows = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "99", "走读", "", ""]]
+    try:
+        with pytest.raises(ValidationError, match="当前仅允许已配置班级提交"):
+            create_submission(roster_upload=excel_upload(rows), photo_uploads=[], document_uploads=[])
+    finally:
+        AppSetting.set_value("collection_scope", "all")
+
+
+@pytest.mark.django_db
 def test_manual_match_binds_only_same_submission(client, settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
     rows = [["A-001", "王芳", "女", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "王芳", "女", "高中部", "2026-2027", "高一", "1", "非走读", "", ""]]

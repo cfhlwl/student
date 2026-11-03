@@ -223,11 +223,17 @@ def toggle_upload(request):
 @staff_required
 def admin_classes(request):
     if request.method == "POST":
+        if request.POST.get("action") == "set_scope":
+            scope = request.POST.get("scope", "all")
+            AppSetting.set_value("collection_scope", "configured" if scope == "configured" else "all")
+            AuditLog.objects.create(actor=request.user, action="set_collection_scope", detail={"scope": AppSetting.get_value("collection_scope")}, ip_address=client_ip(request))
+            messages.success(request, "采集范围已切换为" + ("仅已配置班级" if scope == "configured" else "全校全部范围") + "。")
+            return redirect("admin-classes")
         year_name = request.POST.get("school_year", "").strip()
         if year_name and request.POST.get("grade") and request.POST.get("name"):
             year, _ = SchoolYear.objects.get_or_create(name=year_name, defaults={"is_active": True})
             ClassGroup.objects.get_or_create(department=request.POST.get("department"), school_year=year, grade=request.POST.get("grade"), name=request.POST.get("name"), defaults={"is_active": True})
             messages.success(request, "班级范围已保存。")
             return redirect("admin-classes")
-    return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all()})
+    return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all(), "collection_scope": AppSetting.get_value("collection_scope", "all")})
 

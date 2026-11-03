@@ -12,7 +12,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from PIL import Image, UnidentifiedImageError
 
-from .models import AuditLog, ClassGroup, NamingRule, Student, StudentPhoto, Submission, SubmissionDocument
+from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
@@ -148,7 +148,7 @@ def _department_code(value):
 
 def _class_from_record(record):
     department = "middle" if record["学部"] == "初中部" else "high"
-    school_year, _ = __import__("collector.models", fromlist=["SchoolYear"]).SchoolYear.objects.get_or_create(name=record["学年"], defaults={"is_active": True})
+    school_year, _ = SchoolYear.objects.get_or_create(name=record["学年"], defaults={"is_active": True})
     class_group, _ = ClassGroup.objects.get_or_create(
         department=department, school_year=school_year, grade=record["年级"], name=record["班级"], defaults={"is_active": True}
     )
@@ -195,6 +195,14 @@ def create_submission(*, roster_upload, photo_uploads, document_uploads, note=""
     scopes = {(r.get("学部"), r.get("学年"), r.get("年级"), r.get("班级")) for r in records}
     if len(scopes) != 1:
         raise ValidationError("一次提交只能包含同一学部、学年、年级和班级的学生")
+    if AppSetting.get_value("collection_scope", "all") == "configured":
+        missing_scopes = []
+        for department_name, year_name, grade, class_name in scopes:
+            department = "middle" if department_name == "初中部" else "high"
+            if not ClassGroup.objects.filter(department=department, school_year__name=year_name, grade=grade, name=class_name, is_active=True).exists():
+                missing_scopes.append(f"{department_name}/{year_name}/{grade}/{class_name}")
+        if missing_scopes:
+            raise ValidationError("当前仅允许已配置班级提交：" + "、".join(missing_scopes))
     if len(photo_uploads) > settings.MAX_PHOTOS_PER_SUBMISSION:
         raise ValidationError(f"照片数量不能超过 {settings.MAX_PHOTOS_PER_SUBMISSION} 张")
     if len(document_uploads) > settings.MAX_DOCUMENTS_PER_SUBMISSION:
