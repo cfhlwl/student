@@ -4,9 +4,16 @@
 <main class="public-page">
   <section class="hero">
     <div class="eyebrow">统一入口 / 2026—2027 学年</div>
-    <h1>把一班资料，<em>一次交齐。</em></h1>
     <p class="hero-copy">不用注册，不用记密码。选好文件后提交，系统会自动识别名单、匹配照片，并把缺漏和重名标出来。</p>
     <div class="hero-note"><span class="pulse"></span> 当前公开上传：<strong>{% if upload_open %}开放{% else %}已关闭{% endif %}</strong><span class="dot">·</span> 每次提交都会生成独立版本</div>
+  </section>
+  <section class="photo-guide" id="photo-guide">
+    <div class="photo-guide-heading"><div><span class="kicker">照片拍摄示例</span><h2>先把照片拍对，再一次提交</h2><p>请准备单人、正脸、清晰的近期照片。下面的示例同时包含女生版和男生版，点击图片可查看大图。</p></div><span class="guide-badge">建议：正脸 · 清晰 · 单人</span></div>
+    <div class="photo-guide-grid">
+      <figure><a href="{% static 'images/photo-guide-girl.png' %}" target="_blank" rel="noopener"><img src="{% static 'images/photo-guide-girl.png' %}" alt="女生注册照片拍摄示例" loading="lazy"></a><figcaption>女生版拍摄示例</figcaption></figure>
+      <figure><a href="{% static 'images/photo-guide-boy.png' %}" target="_blank" rel="noopener"><img src="{% static 'images/photo-guide-boy.png' %}" alt="男生注册照片拍摄示例" loading="lazy"></a><figcaption>男生版拍摄示例</figcaption></figure>
+    </div>
+    <div class="photo-rule-grid"><div><strong>合格照片</strong><p>简单背景；正脸平视；表情自然；镜片无反光；面部光照均匀；脸部区域建议不低于 128×128 像素。</p></div><div><strong>容易无法识别</strong><p>低头、抬头、偏头、侧脸、打电话、模糊、太暗、过度修图、多人合照、分辨率太低、面部不完整或被遮挡。</p></div></div>
   </section>
   <section class="process-strip"><div><b>01</b><span>准备名单</span></div><div><b>02</b><span>批量选照片</span></div><div><b>03</b><span>提交并核对</span></div></section>
   {% if form.non_field_errors %}<div class="error-box">{% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
