@@ -9,7 +9,7 @@ from openpyxl import Workbook, load_workbook
 from PIL import Image
 
 from collector.models import AppSetting, Student, StudentPhoto, Submission
-from collector.services import ValidationError, clear_rejected_submissions, create_submission, export_students, template_bytes
+from collector.services import ValidationError, clear_rejected_submissions, create_submission, export_students, parse_roster, template_bytes
 
 
 def excel_upload(rows):
@@ -159,6 +159,12 @@ def test_export_escapes_formula_like_user_values(settings, tmp_path):
 
 def test_template_has_expected_columns():
     book = load_workbook(io.BytesIO(template_bytes()), read_only=True)
-    assert list(book.active.values)[0][:8] == ("学生编号", "姓名", "性别", "学部", "学年", "年级", "班级", "就读类型")
-    assert list(book.active.values)[1][8] == "示例同学.jpg"
+    rows = list(book.active.values)
+    assert rows[3][:8] == ("学生编号", "姓名", "性别", "学部", "学年", "年级", "班级", "就读类型")
+    assert rows[4][8] == "示例同学.jpg"
+
+
+def test_parser_accepts_template_instruction_rows():
+    upload = SimpleUploadedFile("模板.xlsx", template_bytes(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert parse_roster(upload)[0]["照片文件名"] == "示例同学.jpg"
 

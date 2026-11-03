@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from django.conf import settings
 from django.db import transaction
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from PIL import Image, UnidentifiedImageError
 
@@ -107,14 +108,17 @@ def parse_roster(upload):
         raise ValidationError("Excel 无法读取，请使用系统模板保存为 .xlsx") from exc
     if not rows:
         raise ValidationError("Excel 没有数据")
-    header = [_text(v) for v in rows[0]]
+    header_index = next((index for index, row in enumerate(rows[:10]) if {"姓名", "学部", "学年", "年级", "班级", "就读类型"}.issubset({_text(v) for v in row})), None)
+    if header_index is None:
+        header_index = 0
+    header = [_text(v) for v in rows[header_index]]
     missing = [h for h in ["姓名", "学部", "学年", "年级", "班级", "就读类型"] if h not in header]
     if missing:
         raise ValidationError("Excel 缺少必填列：" + "、".join(missing))
     positions = {h: i for i, h in enumerate(header) if h}
     records, errors = [], []
     seen = set()
-    for row_no, row in enumerate(rows[1:], start=2):
+    for row_no, row in enumerate(rows[header_index + 1:], start=header_index + 2):
         if not any(v not in (None, "") for v in row):
             continue
         record = {h: _text(row[i]) if i < len(row) else "" for h, i in positions.items()}
@@ -370,8 +374,21 @@ def template_bytes():
     book = Workbook()
     sheet = book.active
     sheet.title = "学生名单"
-    sheet.append(HEADERS)
-    sheet.append(["2026-001", "示例同学", "男", "高中部", "2026-2027", "高一", "1", "走读", "示例同学.jpg", "虚构示例，仅用于测试"])
+    sheet.merge_cells("A1:J1")
+    sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、年级、班级、就读类型为必填。"
+    sheet.merge_cells("A2:J2")
+    sheet["A2"] = "就读类型只能填写：走读、非走读、半走读；性别只能填写：男、女；照片文件名建议填写：姓名.jpg。"
+    for cell_ref in ("A1", "A2"):
+        sheet[cell_ref].font = Font(bold=True, color="FFFFFF" if cell_ref == "A1" else "17233B")
+        sheet[cell_ref].fill = PatternFill("solid", fgColor="17233B" if cell_ref == "A1" else "E8F5F2")
+        sheet[cell_ref].alignment = Alignment(vertical="center")
+    for col, header in enumerate(HEADERS, start=1):
+        cell = sheet.cell(row=4, column=col, value=header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="E76F3C")
+    for col, value in enumerate(["2026-001", "示例同学", "男", "高中部", "2026-2027", "高一", "1", "走读", "示例同学.jpg", "虚构示例，仅用于测试"], start=1):
+        sheet.cell(row=5, column=col, value=value)
+    sheet.freeze_panes = "A5"
     for col in range(1, len(HEADERS) + 1): sheet.column_dimensions[get_column_letter(col)].width = 18
     out = io.BytesIO(); book.save(out); return out.getvalue()
 
