@@ -125,6 +125,7 @@ def test_public_home_has_title_and_floating_photo_guide(client):
     content = response.content.decode()
     assert response.status_code == 200
     assert "赤峰一中学生资料采集" in content
+    assert 'class="public-title"' not in content
     assert "统一入口 / 2026 学年" not in content
     assert "当前公开上传" not in content
     assert 'class="photo-guide-float"' in content
