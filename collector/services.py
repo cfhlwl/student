@@ -371,7 +371,7 @@ def template_bytes():
     sheet = book.active
     sheet.title = "学生名单"
     sheet.append(HEADERS)
-    sheet.append(["2026-001", "示例同学", "男", "高中部", "2026-2027", "高一", "1", "走读", "2026-001.jpg", "虚构示例，仅用于测试"])
+    sheet.append(["2026-001", "示例同学", "男", "高中部", "2026-2027", "高一", "1", "走读", "示例同学.jpg", "虚构示例，仅用于测试"])
     for col in range(1, len(HEADERS) + 1): sheet.column_dimensions[get_column_letter(col)].width = 18
     out = io.BytesIO(); book.save(out); return out.getvalue()
 

@@ -160,4 +160,5 @@ def test_export_escapes_formula_like_user_values(settings, tmp_path):
 def test_template_has_expected_columns():
     book = load_workbook(io.BytesIO(template_bytes()), read_only=True)
     assert list(book.active.values)[0][:8] == ("学生编号", "姓名", "性别", "学部", "学年", "年级", "班级", "就读类型")
+    assert list(book.active.values)[1][8] == "示例同学.jpg"
 
