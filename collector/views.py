@@ -70,12 +70,20 @@ def upload_start(request):
             roster_upload=request.FILES.get("roster"),
             document_uploads=request.FILES.getlist("documents"),
             expected_photo_count=expected_photo_count,
+            photo_manifest=request.POST.get("photo_manifest", ""),
+            roster_fingerprint=request.POST.get("roster_fingerprint", ""),
             note=request.POST.get("note", ""),
             ip_address=client_ip(request),
         )
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
-    return JsonResponse({"upload_id": str(session.id), "upload_token": token, "roster_count": roster_count, "expected_photo_count": expected_photo_count})
+    return JsonResponse({
+        "upload_id": str(session.id),
+        "upload_token": token,
+        "roster_count": roster_count,
+        "expected_photo_count": expected_photo_count,
+        "photo_manifest_digest": session.photo_manifest_digest,
+    })
 
 
 @require_POST
@@ -83,7 +91,15 @@ def upload_photo_batch(request, session_id):
     try:
         sequence = int(request.POST.get("batch_no", "-1"))
         UploadSession.objects.get(pk=session_id)
-        batch, count = stage_upload_batch(session_id, "photo", sequence, request.FILES.getlist("photos"), token=request.POST.get("upload_token"))
+        batch, count = stage_upload_batch(
+            session_id,
+            "photo",
+            sequence,
+            request.FILES.getlist("photos"),
+            token=request.POST.get("upload_token"),
+            manifest_digest=request.POST.get("manifest_digest", ""),
+            roster_fingerprint=request.POST.get("roster_fingerprint"),
+        )
     except UploadSession.DoesNotExist:
         return JsonResponse({"error": "上传会话不存在"}, status=404)
     except (ValidationError, TypeError, ValueError) as exc:
@@ -94,7 +110,13 @@ def upload_photo_batch(request, session_id):
 @require_POST
 def upload_complete(request, session_id):
     try:
-        submission, token = finalize_upload_session(session_id=session_id, token=request.POST.get("upload_token", ""), ip_address=client_ip(request))
+        submission, token = finalize_upload_session(
+            session_id=session_id,
+            token=request.POST.get("upload_token", ""),
+            manifest_digest=request.POST.get("manifest_digest", ""),
+            roster_fingerprint=request.POST.get("roster_fingerprint"),
+            ip_address=client_ip(request),
+        )
     except UploadSession.DoesNotExist:
         return JsonResponse({"error": "上传会话不存在"}, status=404)
     except ValidationError as exc:

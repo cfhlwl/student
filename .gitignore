@@ -1,6 +1,8 @@
 .env
 db.sqlite3
 data/
+.r2-data/
+.r2-media/
 media/
 staticfiles/
 __pycache__/

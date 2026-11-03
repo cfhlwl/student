@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('input[type=file]').forEach(function (input) {
     input.addEventListener('change', function () {
+      window.__studentUploadState = null;
       const target = document.querySelector('[data-file-count="' + input.name + '"]');
       const hint = input.closest('.upload-field')?.querySelector('.file-hint');
       const defaultHint = input.name === 'roster' ? '点击选择 .xlsx 文件' : input.name === 'photos' ? '点击或拖入照片' : '点击选择文档';
@@ -21,6 +22,25 @@ document.addEventListener('DOMContentLoaded', function () {
   const progress = document.getElementById('upload-progress');
   const submitButton = document.getElementById('submit-button');
   if (submitForm && progress && submitButton) {
+    async function fileFingerprint(file) {
+      const metadata = file.name + '\\0' + file.size + '\\0' + file.lastModified;
+      if (window.crypto && window.crypto.subtle) {
+        const digest = await window.crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+        return Array.from(new Uint8Array(digest)).map(function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+      }
+      return 'meta:' + metadata;
+    }
+    async function buildPhotoManifest(files) {
+      const manifest = [];
+      for (const file of files) {
+        const fingerprint = await fileFingerprint(file);
+        manifest.push({name: file.name, size: file.size, sha256: fingerprint.indexOf('meta:') === 0 ? '' : fingerprint, fingerprint: fingerprint});
+      }
+      return manifest;
+    }
+    function buildDocumentManifest(files) {
+      return files.map(function (file) { return {name: file.name, size: file.size, lastModified: file.lastModified}; });
+    }
     async function uploadInBatches() {
       const photoInput = submitForm.querySelector('[name=photos]');
       const rosterInput = submitForm.querySelector('[name=roster]');
@@ -29,7 +49,14 @@ document.addEventListener('DOMContentLoaded', function () {
       const batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024;
       const csrf = submitForm.querySelector('[name=csrfmiddlewaretoken]').value;
       const files = Array.from(photoInput?.files || []);
+      const photoManifest = await buildPhotoManifest(files);
+      const rosterFingerprint = await fileFingerprint(rosterInput.files[0]);
+      const documentManifest = buildDocumentManifest(Array.from(documentInput?.files || []));
+      const inputKey = JSON.stringify({rosterFingerprint: rosterFingerprint, photoManifest: photoManifest, documentManifest: documentManifest});
       let state = window.__studentUploadState;
+      if (state && state.inputKey !== inputKey) {
+        state = window.__studentUploadState = null;
+      }
       const jsonRequest = async function (url, data) {
         const response = await fetch(url, {method: 'POST', headers: {'X-CSRFToken': csrf}, body: data});
         const body = await response.json().catch(function () { return {}; });
@@ -40,10 +67,12 @@ document.addEventListener('DOMContentLoaded', function () {
         const startData = new FormData();
         startData.append('roster', rosterInput.files[0], rosterInput.files[0].name);
         startData.append('expected_photo_count', String(files.length));
+        startData.append('photo_manifest', JSON.stringify(photoManifest));
+        startData.append('roster_fingerprint', rosterFingerprint);
         startData.append('note', submitForm.querySelector('[name=note]')?.value || '');
         Array.from(documentInput?.files || []).forEach(function (file) { startData.append('documents', file, file.name); });
         const started = await jsonRequest(submitForm.dataset.uploadStart, startData);
-        state = window.__studentUploadState = {id: started.upload_id, token: started.upload_token, nextIndex: 0, batchNo: 0};
+        state = window.__studentUploadState = {id: started.upload_id, token: started.upload_token, nextIndex: 0, batchNo: 0, inputKey: inputKey, manifestDigest: started.photo_manifest_digest, rosterFingerprint: rosterFingerprint};
       }
       submitButton.disabled = true;
       progress.style.display = 'block';
@@ -59,6 +88,8 @@ document.addEventListener('DOMContentLoaded', function () {
         const batchData = new FormData();
         batchData.append('batch_no', String(state.batchNo));
         batchData.append('upload_token', state.token);
+        batchData.append('manifest_digest', state.manifestDigest || '');
+        batchData.append('roster_fingerprint', state.rosterFingerprint || '');
         files.slice(start, end).forEach(function (file) { batchData.append('photos', file, file.name); });
         await jsonRequest(submitForm.dataset.uploadBatch.replace('00000000-0000-0000-0000-000000000000', state.id), batchData);
         state.nextIndex = end;
@@ -67,6 +98,8 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       const completeData = new FormData();
       completeData.append('upload_token', state.token);
+      completeData.append('manifest_digest', state.manifestDigest || '');
+      completeData.append('roster_fingerprint', state.rosterFingerprint || '');
       const completed = await jsonRequest(submitForm.dataset.uploadComplete.replace('00000000-0000-0000-0000-000000000000', state.id), completeData);
       window.__studentUploadState = null;
       window.location.href = completed.result_url;
@@ -74,7 +107,9 @@ document.addEventListener('DOMContentLoaded', function () {
     submitForm.addEventListener('submit', function (event) {
       const photoInput = submitForm.querySelector('[name=photos]');
       const batchSize = Number(submitForm.dataset.photoBatchSize || 20);
-      if (photoInput && photoInput.files.length > batchSize) {
+      const batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024;
+      const totalPhotoBytes = Array.from(photoInput?.files || []).reduce(function (total, file) { return total + file.size; }, 0);
+      if (photoInput && (photoInput.files.length > batchSize || totalPhotoBytes > batchBytes)) {
         event.preventDefault();
         uploadInBatches().catch(function (error) {
           submitButton.disabled = false;
