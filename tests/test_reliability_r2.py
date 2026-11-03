@@ -16,7 +16,8 @@ from openpyxl import load_workbook
 from PIL import Image
 
 from collector.forms import ExportFilterForm
-from collector.models import NamingRule, Student, StudentPhoto
+from collector.models import AppSetting, ClassGroup, NamingRule, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, UploadBatch, UploadSession
+from collector import services
 from collector.services import ValidationError, create_submission, export_students_to_tempfile, grade_for, review_submission_version, template_bytes
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -27,9 +28,21 @@ def roster_file(rows, name="名单.xlsx"):
 
     book = Workbook()
     sheet = book.active
-    sheet.append(["姓名", "性别", "学部", "学年", "班级", "就读类型", "备注"])
+    sheet.append(["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型", "备注"] if rows and len(rows[0]) == 8 else ["姓名", "性别", "学部", "学年", "班级", "就读类型", "备注"])
     for row in rows:
         sheet.append(row)
+    data = io.BytesIO()
+    book.save(data)
+    return SimpleUploadedFile(name, data.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def explicit_roster_file(row, name="明确年级名单.xlsx"):
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型", "备注"])
+    sheet.append(row)
     data = io.BytesIO()
     book.save(data)
     return SimpleUploadedFile(name, data.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -65,7 +78,9 @@ def complete_submission(rows, photos, documents=None):
 
 def test_frontend_batches_when_total_size_exceeds_limit():
     source = open("static/js/app.js", encoding="utf-8").read()
-    assert re.search(r"photoInput\.files\.length\s*>\s*batchSize\s*\|\|", source)
+    assert "photoInput.files.length > batchSize" in source
+    assert "totalPhotoBytes > batchBytes" in source
+    assert "totalPhotoBytes + totalDocumentBytes + rosterBytes > batchBytes" in source
     assert "files.reduce" in source or "file.size" in source and "batchBytes" in source
 
 
@@ -112,13 +127,54 @@ def test_upload_session_rejects_changed_photo_manifest():
     assert response.status_code == 400
 
 
+def test_photo_batch_requires_token_and_has_no_side_effect(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    client = Client()
+    photo = photo_file("令牌照片.jpg")
+    photo_data = photo.read()
+    photo.seek(0)
+    manifest = [{"name": photo.name, "size": len(photo_data), "sha256": hashlib.sha256(photo_data).hexdigest()}]
+    response = client.post(
+        reverse("upload-start"),
+        data={"roster": roster_file([["令牌学生", "男", "高中部", "2026", "高一", "1", "走读", ""]]), "expected_photo_count": "1", "photo_manifest": json.dumps(manifest, ensure_ascii=False)},
+    )
+    state = response.json()
+    session_root = tmp_path / "upload_sessions" / state["upload_id"]
+    before = sorted(str(path.relative_to(session_root)) for path in session_root.rglob("*") if path.is_file())
+    for token in (None, "not-the-token"):
+        data = {"batch_no": "0", "photos": [photo_file("令牌照片.jpg")], "manifest_digest": state["photo_manifest_digest"]}
+        if token is not None:
+            data["upload_token"] = token
+        failed = client.post(reverse("upload-photo-batch", args=[state["upload_id"]]), data=data)
+        assert failed.status_code == 400
+    after = sorted(str(path.relative_to(session_root)) for path in session_root.rglob("*") if path.is_file())
+    assert before == after
+    assert not UploadBatch.objects.exists()
+    assert not StagedUpload.objects.exists()
+
+
+def test_photo_manifest_is_required_for_nonempty_session(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    response = Client().post(
+        reverse("upload-start"),
+        data={"roster": roster_file([["清单必填", "男", "高中部", "2026", "高一", "1", "走读", ""]]), "expected_photo_count": "1"},
+    )
+    assert response.status_code == 400
+    assert not UploadSession.objects.exists()
+
+
 def test_upload_session_rejects_changed_roster_fingerprint():
     client = Client()
+    photo = photo_file("名单变化.jpg")
+    photo_data = photo.read()
+    photo.seek(0)
+    manifest = [{"name": photo.name, "size": len(photo_data), "sha256": hashlib.sha256(photo_data).hexdigest()}]
     response = client.post(
         reverse("upload-start"),
         data={
             "roster": roster_file([["名单变化", "男", "高中部", "2026", "1", "走读", ""]]),
             "expected_photo_count": "1",
+            "photo_manifest": json.dumps(manifest, ensure_ascii=False),
             "roster_fingerprint": "old-roster",
         },
     )
@@ -129,6 +185,7 @@ def test_upload_session_rejects_changed_roster_fingerprint():
         data={
             "batch_no": "0",
             "upload_token": state["upload_token"],
+            "manifest_digest": state["photo_manifest_digest"],
             "roster_fingerprint": "new-roster",
             "photos": [photo_file("名单变化.jpg")],
         },
@@ -138,21 +195,26 @@ def test_upload_session_rejects_changed_roster_fingerprint():
 
 def test_duplicate_complete_returns_same_result_token_and_old_link_stays_valid():
     client = Client()
+    photo = photo_file("重复完成.jpg")
+    photo_data = photo.read()
+    photo.seek(0)
+    manifest = [{"name": photo.name, "size": len(photo_data), "sha256": hashlib.sha256(photo_data).hexdigest()}]
     response = client.post(
         reverse("upload-start"),
         data={
             "roster": roster_file([["重复完成", "男", "高中部", "2026", "1", "走读", ""]]),
             "expected_photo_count": "1",
+            "photo_manifest": json.dumps(manifest, ensure_ascii=False),
         },
     )
     state = response.json()
     batch = client.post(
         reverse("upload-photo-batch", args=[state["upload_id"]]),
-        data={"batch_no": "0", "upload_token": state["upload_token"], "photos": [photo_file("重复完成.jpg")]},
+        data={"batch_no": "0", "upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"], "photos": [photo_file("重复完成.jpg")]},
     )
     assert batch.status_code == 200
-    first = client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"]}).json()
-    second = client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"]})
+    first = client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"]}).json()
+    second = client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"]})
     assert second.status_code == 200
     assert second.json()["token"] == first["token"]
     assert client.get(first["result_url"]).status_code == 200
@@ -214,6 +276,117 @@ def test_current_school_year_semantics_are_explicit_in_template_and_choices():
     book = load_workbook(io.BytesIO(template_bytes()), data_only=True)
     instructions = " ".join(str(book.active.cell(row, 1).value or "") for row in (1, 2))
     assert "当前在读学年" in instructions
+
+
+def test_same_current_school_year_keeps_all_six_grades_and_export_paths(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    admin = User.objects.create(username="r2-six-grades")
+    grade_rows = [
+        ("初一", "初中部"), ("初二", "初中部"), ("初三", "初中部"),
+        ("高一", "高中部"), ("高二", "高中部"), ("高三", "高中部"),
+    ]
+    submissions = []
+    for index, (grade, department) in enumerate(grade_rows):
+        name = f"同学年{grade}"
+        class_name = f"F1-{index + 1}"
+        submission, _ = create_submission(
+            roster_upload=explicit_roster_file([name, "男", department, "2026", grade, class_name, "走读", ""]),
+            photo_uploads=[photo_file(name + ".jpg")],
+            document_uploads=[],
+        )
+        review_submission_version(submission_id=submission.id, action="approved", actor=admin)
+        submissions.append(submission)
+    temp_path, count, _ = export_students_to_tempfile({"school_year__name": "2026"}, actor=admin)
+    try:
+        with zipfile.ZipFile(temp_path) as archive:
+            names = set(archive.namelist())
+            assert count == 6
+            for grade, department in grade_rows:
+                assert any(name.startswith(f"{department}/{grade}/") and name.endswith(".jpg") for name in names)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def test_configured_scope_uses_explicit_grade_for_same_school_year():
+    AppSetting.set_value("collection_scope", "configured")
+    year = SchoolYear.objects.create(name="2026")
+    ClassGroup.objects.create(department="high", school_year=year, grade="高二", name="配置高二", is_active=True)
+    try:
+        submission = complete_submission(
+            [["配置高二学生", "男", "高中部", "2026", "高二", "配置高二", "走读", ""]],
+            [photo_file("配置高二学生.jpg")],
+        )
+        assert submission.grade == "高二"
+        assert submission.class_group.grade == "高二"
+    finally:
+        AppSetting.set_value("collection_scope", "all")
+
+
+def test_finalize_recovers_after_interruption_after_submission_create(settings, tmp_path, monkeypatch):
+    settings.MEDIA_ROOT = tmp_path
+    client = Client()
+    photo = photo_file("恢复提交.jpg")
+    photo_data = photo.read()
+    photo.seek(0)
+    manifest = [{"name": photo.name, "size": len(photo_data), "sha256": hashlib.sha256(photo_data).hexdigest()}]
+    started = client.post(
+        reverse("upload-start"),
+        data={"roster": roster_file([["恢复提交", "男", "高中部", "2026", "高一", "1", "走读", ""]]), "expected_photo_count": "1", "photo_manifest": json.dumps(manifest, ensure_ascii=False)},
+    ).json()
+    assert client.post(reverse("upload-photo-batch", args=[started["upload_id"]]), data={"batch_no": "0", "upload_token": started["upload_token"], "manifest_digest": started["photo_manifest_digest"], "photos": [photo_file("恢复提交.jpg")] }).status_code == 200
+    original = services._mark_upload_session_completed
+    calls = {"count": 0}
+
+    def fail_once(session_id, submission):
+        if calls["count"] == 0:
+            calls["count"] += 1
+            raise RuntimeError("模拟进程中断")
+        return original(session_id, submission)
+
+    monkeypatch.setattr(services, "_mark_upload_session_completed", fail_once)
+    with pytest.raises(RuntimeError, match="模拟进程中断"):
+        services.finalize_upload_session(session_id=started["upload_id"], token=started["upload_token"], manifest_digest=started["photo_manifest_digest"])
+    session = UploadSession.objects.get(pk=started["upload_id"])
+    assert session.status == "pending"
+    assert Submission.objects.count() == 1
+    recovered, token = services.finalize_upload_session(session_id=started["upload_id"], token=started["upload_token"], manifest_digest=started["photo_manifest_digest"])
+    assert recovered.id == Submission.objects.get().id
+    assert token == services._session_result_token(started["upload_id"])
+    assert UploadSession.objects.get(pk=started["upload_id"]).status == "completed"
+    assert Submission.objects.count() == 1
+
+
+def test_finalize_removes_partial_submission_and_orphan_tree_before_retry(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    client = Client()
+    photo = photo_file("半成品恢复.jpg")
+    photo_data = photo.read()
+    photo.seek(0)
+    manifest = [{"name": photo.name, "size": len(photo_data), "sha256": hashlib.sha256(photo_data).hexdigest()}]
+    started = client.post(
+        reverse("upload-start"),
+        data={"roster": roster_file([["半成品恢复", "男", "高中部", "2026", "高一", "1", "走读", ""]]), "expected_photo_count": "1", "photo_manifest": json.dumps(manifest, ensure_ascii=False)},
+    ).json()
+    assert client.post(reverse("upload-photo-batch", args=[started["upload_id"]]), data={"batch_no": "0", "upload_token": started["upload_token"], "manifest_digest": started["photo_manifest_digest"], "photos": [photo_file("半成品恢复.jpg")] }).status_code == 200
+    session = UploadSession.objects.get(pk=started["upload_id"])
+    with session.roster_file.open("rb") as source:
+        records = services.parse_roster(SimpleUploadedFile("名单.xlsx", source.read(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+    school_year, class_group = services._class_from_record(records[0])
+    stable_token = services._session_result_token(session.id)
+    partial = Submission.objects.create(
+        access_token_hash=hashlib.sha256(stable_token.encode()).hexdigest(),
+        department=class_group.department, school_year=school_year, grade=class_group.grade,
+        class_group=class_group, source_filename="半成品.xlsx",
+    )
+    orphan = tmp_path / "submissions" / str(partial.id) / "photos" / "孤儿.jpg"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(b"orphan")
+    recovered, token = services.finalize_upload_session(session_id=session.id, token=started["upload_token"], manifest_digest=started["photo_manifest_digest"])
+    assert recovered.id != partial.id
+    assert token == stable_token
+    assert not Submission.objects.filter(pk=partial.id).exists()
+    assert not orphan.exists()
+    assert UploadSession.objects.get(pk=session.id).status == "completed"
 
 
 def test_study_type_contract_has_no_non_boarding_value():

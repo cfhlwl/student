@@ -46,12 +46,14 @@ document.addEventListener('DOMContentLoaded', function () {
       const rosterInput = submitForm.querySelector('[name=roster]');
       const documentInput = submitForm.querySelector('[name=documents]');
       const batchSize = Number(submitForm.dataset.photoBatchSize || 20);
+      const documentBatchSize = 10;
       const batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024;
       const csrf = submitForm.querySelector('[name=csrfmiddlewaretoken]').value;
       const files = Array.from(photoInput?.files || []);
+      const documents = Array.from(documentInput?.files || []);
       const photoManifest = await buildPhotoManifest(files);
       const rosterFingerprint = await fileFingerprint(rosterInput.files[0]);
-      const documentManifest = buildDocumentManifest(Array.from(documentInput?.files || []));
+      const documentManifest = buildDocumentManifest(documents);
       const inputKey = JSON.stringify({rosterFingerprint: rosterFingerprint, photoManifest: photoManifest, documentManifest: documentManifest});
       let state = window.__studentUploadState;
       if (state && state.inputKey !== inputKey) {
@@ -67,35 +69,41 @@ document.addEventListener('DOMContentLoaded', function () {
         const startData = new FormData();
         startData.append('roster', rosterInput.files[0], rosterInput.files[0].name);
         startData.append('expected_photo_count', String(files.length));
+        startData.append('expected_document_count', String(documents.length));
         startData.append('photo_manifest', JSON.stringify(photoManifest));
         startData.append('roster_fingerprint', rosterFingerprint);
         startData.append('note', submitForm.querySelector('[name=note]')?.value || '');
-        Array.from(documentInput?.files || []).forEach(function (file) { startData.append('documents', file, file.name); });
         const started = await jsonRequest(submitForm.dataset.uploadStart, startData);
-        state = window.__studentUploadState = {id: started.upload_id, token: started.upload_token, nextIndex: 0, batchNo: 0, inputKey: inputKey, manifestDigest: started.photo_manifest_digest, rosterFingerprint: rosterFingerprint};
+        state = window.__studentUploadState = {id: started.upload_id, token: started.upload_token, photoIndex: 0, documentIndex: 0, photoBatchNo: 0, documentBatchNo: 0, inputKey: inputKey, manifestDigest: started.photo_manifest_digest, rosterFingerprint: rosterFingerprint};
       }
       submitButton.disabled = true;
       progress.style.display = 'block';
-      const total = files.length || 1;
-      while (state.nextIndex < files.length) {
-        const start = state.nextIndex;
-        let end = start;
-        let size = 0;
-        while (end < files.length && end < start + batchSize && (end === start || size + files[end].size <= batchBytes)) {
-          size += files[end].size;
-          end += 1;
+      const total = files.length + documents.length || 1;
+      let completedCount = state.photoIndex + state.documentIndex;
+      const uploadFileBatches = async function (items, fieldName, endpoint, indexKey, batchKey, maxCount) {
+        while (state[indexKey] < items.length) {
+          const start = state[indexKey];
+          let end = start;
+          let size = 0;
+          while (end < items.length && end < start + maxCount && (end === start || size + items[end].size <= batchBytes)) {
+            size += items[end].size;
+            end += 1;
+          }
+          const batchData = new FormData();
+          batchData.append('batch_no', String(state[batchKey]));
+          batchData.append('upload_token', state.token);
+          batchData.append('manifest_digest', state.manifestDigest || '');
+          batchData.append('roster_fingerprint', state.rosterFingerprint || '');
+          items.slice(start, end).forEach(function (file) { batchData.append(fieldName, file, file.name); });
+          await jsonRequest(endpoint.replace('00000000-0000-0000-0000-000000000000', state.id), batchData);
+          state[indexKey] = end;
+          state[batchKey] += 1;
+          completedCount += end - start;
+          progress.querySelector('span').style.width = Math.min(95, Math.round((completedCount / total) * 95)) + '%';
         }
-        const batchData = new FormData();
-        batchData.append('batch_no', String(state.batchNo));
-        batchData.append('upload_token', state.token);
-        batchData.append('manifest_digest', state.manifestDigest || '');
-        batchData.append('roster_fingerprint', state.rosterFingerprint || '');
-        files.slice(start, end).forEach(function (file) { batchData.append('photos', file, file.name); });
-        await jsonRequest(submitForm.dataset.uploadBatch.replace('00000000-0000-0000-0000-000000000000', state.id), batchData);
-        state.nextIndex = end;
-        state.batchNo += 1;
-        progress.querySelector('span').style.width = Math.min(95, Math.round((end / total) * 95)) + '%';
-      }
+      };
+      await uploadFileBatches(files, 'photos', submitForm.dataset.uploadBatch, 'photoIndex', 'photoBatchNo', batchSize);
+      await uploadFileBatches(documents, 'documents', submitForm.dataset.uploadDocumentBatch, 'documentIndex', 'documentBatchNo', documentBatchSize);
       const completeData = new FormData();
       completeData.append('upload_token', state.token);
       completeData.append('manifest_digest', state.manifestDigest || '');
@@ -106,10 +114,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     submitForm.addEventListener('submit', function (event) {
       const photoInput = submitForm.querySelector('[name=photos]');
+      const documentInput = submitForm.querySelector('[name=documents]');
       const batchSize = Number(submitForm.dataset.photoBatchSize || 20);
       const batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024;
       const totalPhotoBytes = Array.from(photoInput?.files || []).reduce(function (total, file) { return total + file.size; }, 0);
-      if (photoInput && (photoInput.files.length > batchSize || totalPhotoBytes > batchBytes)) {
+      const totalDocumentBytes = Array.from(documentInput?.files || []).reduce(function (total, file) { return total + file.size; }, 0);
+      const rosterBytes = submitForm.querySelector('[name=roster]')?.files[0]?.size || 0;
+      if (photoInput && (photoInput.files.length > batchSize || totalPhotoBytes > batchBytes || (documentInput && documentInput.files.length) || totalPhotoBytes + totalDocumentBytes + rosterBytes > batchBytes)) {
         event.preventDefault();
         uploadInBatches().catch(function (error) {
           submitButton.disabled = false;

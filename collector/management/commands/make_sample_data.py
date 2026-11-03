@@ -16,9 +16,9 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         target = Path(options["output"]); target.mkdir(parents=True, exist_ok=True)
         book = Workbook(); sheet = book.active; sheet.title = "学生名单"
-        headers = ["姓名", "性别", "学部", "学年", "班级", "就读类型", "备注"]
-        sheet.merge_cells("A1:G1"); sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、班级、就读类型为必填；年级由学部和学年自动判断。"
-        sheet.merge_cells("A2:G2"); sheet["A2"] = "学年只能填写 2024、2025 或 2026；高中部对应高三、高二、高一，初中部对应初三、初二、初一；照片默认按姓名匹配。"
+        headers = ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型", "备注"]
+        sheet.merge_cells("A1:H1"); sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、年级、班级、就读类型为必填；学年是当前在读学年的起始年份，不是入学年份。"
+        sheet.merge_cells("A2:H2"); sheet["A2"] = "同一学年可填写初一、初二、初三、高一、高二或高三；旧版没有年级列的名单仍按旧学年映射兼容；照片默认按姓名匹配。"
         for cell_ref in ("A1", "A2"):
             sheet[cell_ref].font = Font(bold=True, color="FFFFFF" if cell_ref == "A1" else "17233B")
             sheet[cell_ref].fill = PatternFill("solid", fgColor="17233B" if cell_ref == "A1" else "E8F5F2")
@@ -27,7 +27,7 @@ class Command(BaseCommand):
             cell = sheet.cell(row=4, column=col, value=header)
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="E76F3C")
-        rows = [["示例张", "男", "高中部", "2026", "1", "走读", "虚构数据"], ["示例李", "女", "高中部", "2026", "1", "半走读", "虚构数据"], ["示例王", "男", "高中部", "2026", "1", "住宿", "演示缺照片"]]
+        rows = [["示例张", "男", "高中部", "2026", "高一", "1", "走读", "虚构数据"], ["示例李", "女", "高中部", "2026", "高一", "1", "半走读", "虚构数据"], ["示例王", "男", "高中部", "2026", "高一", "1", "住宿", "演示缺照片"]]
         for row_number, row in enumerate(rows, start=5):
             for col, value in enumerate(row, start=1): sheet.cell(row=row_number, column=col, value=value)
         sheet.freeze_panes = "A5"

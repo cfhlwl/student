@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import threading
 import time
 import tracemalloc
@@ -39,8 +40,22 @@ def document_file(name="通知.pdf", content=b"%PDF-R1-DOCUMENT"):
     return SimpleUploadedFile(name, content, content_type="application/pdf")
 
 
+def photo_manifest(photos):
+    manifest = []
+    for photo in photos:
+        photo.seek(0)
+        payload = photo.read()
+        photo.seek(0)
+        manifest.append({"name": photo.name, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()})
+    return json.dumps(manifest, ensure_ascii=False)
+
+
 def batch_submit(client, rows, photos):
-    response = client.post(reverse("upload-start"), data={"roster": roster_file(rows), "expected_photo_count": str(len(photos)), "note": "R1虚构测试"})
+    roster = roster_file(rows)
+    roster.seek(0)
+    roster_digest = hashlib.sha256(roster.read()).hexdigest()
+    roster.seek(0)
+    response = client.post(reverse("upload-start"), data={"roster": roster, "expected_photo_count": str(len(photos)), "photo_manifest": photo_manifest(photos), "roster_fingerprint": roster_digest, "note": "R1虚构测试"})
     assert response.status_code == 200, response.content
     state = response.json()
     session_id = state["upload_id"]
@@ -49,10 +64,10 @@ def batch_submit(client, rows, photos):
         batch = photos[batch_no:batch_no + 20]
         response = client.post(
             reverse("upload-photo-batch", args=[session_id]),
-            data={"batch_no": str(batch_no // 20), "upload_token": token, "photos": batch},
+            data={"batch_no": str(batch_no // 20), "upload_token": token, "manifest_digest": state["photo_manifest_digest"], "roster_fingerprint": roster_digest, "photos": batch},
         )
         assert response.status_code == 200, response.content
-    response = client.post(reverse("upload-complete", args=[session_id]), data={"upload_token": token})
+    response = client.post(reverse("upload-complete", args=[session_id]), data={"upload_token": token, "manifest_digest": state["photo_manifest_digest"], "roster_fingerprint": roster_digest})
     assert response.status_code == 200, response.content
     return Submission.objects.get(pk=response.json()["submission_id"])
 
@@ -75,13 +90,14 @@ def test_batch_upload_counts_disk_files_and_sha256(settings, client, tmp_path, p
 def test_batch_retry_is_idempotent_and_can_complete(settings, client, tmp_path):
     settings.MEDIA_ROOT = tmp_path
     rows = [["可重试", "男", "高中部", "2026", "1", "走读", ""]]
-    response = client.post(reverse("upload-start"), data={"roster": roster_file(rows), "expected_photo_count": "1"})
+    photo = photo_file("可重试.jpg")
+    response = client.post(reverse("upload-start"), data={"roster": roster_file(rows), "expected_photo_count": "1", "photo_manifest": photo_manifest([photo])})
     state = response.json()
-    batch_data = {"batch_no": "0", "upload_token": state["upload_token"], "photos": [photo_file("可重试.jpg")]}
+    batch_data = {"batch_no": "0", "upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"], "photos": [photo_file("可重试.jpg")]}
     first = client.post(reverse("upload-photo-batch", args=[state["upload_id"]]), data=batch_data)
-    retry = client.post(reverse("upload-photo-batch", args=[state["upload_id"]]), data={"batch_no": "0", "upload_token": state["upload_token"], "photos": [photo_file("可重试.jpg")]})
+    retry = client.post(reverse("upload-photo-batch", args=[state["upload_id"]]), data={"batch_no": "0", "upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"], "photos": [photo_file("可重试.jpg")]})
     assert first.status_code == retry.status_code == 200
-    submission = client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"]}).json()
+    submission = client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"]}).json()
     assert Student.objects.filter(submission_id=submission["submission_id"]).count() == 1
     assert StudentPhoto.objects.filter(submission_id=submission["submission_id"]).count() == 1
 
@@ -90,11 +106,12 @@ def test_batch_retry_is_idempotent_and_can_complete(settings, client, tmp_path):
 def test_staged_upload_survives_new_client_connection(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
     first_client = Client()
-    response = first_client.post(reverse("upload-start"), data={"roster": roster_file([["重启后完成", "男", "高中部", "2026", "1", "走读", ""]]), "expected_photo_count": "1"})
+    photo = photo_file("重启后完成.jpg")
+    response = first_client.post(reverse("upload-start"), data={"roster": roster_file([["重启后完成", "男", "高中部", "2026", "1", "走读", ""]]), "expected_photo_count": "1", "photo_manifest": photo_manifest([photo])})
     state = response.json()
-    assert first_client.post(reverse("upload-photo-batch", args=[state["upload_id"]]), data={"batch_no": "0", "upload_token": state["upload_token"], "photos": [photo_file("重启后完成.jpg")] }).status_code == 200
+    assert first_client.post(reverse("upload-photo-batch", args=[state["upload_id"]]), data={"batch_no": "0", "upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"], "photos": [photo_file("重启后完成.jpg")] }).status_code == 200
     second_client = Client()
-    completed = second_client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"]})
+    completed = second_client.post(reverse("upload-complete", args=[state["upload_id"]]), data={"upload_token": state["upload_token"], "manifest_digest": state["photo_manifest_digest"]})
     assert completed.status_code == 200
     assert Student.objects.filter(submission_id=completed.json()["submission_id"]).count() == 1
 

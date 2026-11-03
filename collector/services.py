@@ -34,8 +34,8 @@ FIELD_MAP = {
     "姓名": "name", "性别": "gender", "学部": "department", "学年": "school_year",
     "班级": "class_name", "就读类型": "study_type",
 }
-HEADERS = ["姓名", "性别", "学部", "学年", "班级", "就读类型", "备注"]
-GRADE_BY_YEAR = {
+HEADERS = ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型", "备注"]
+LEGACY_GRADE_BY_YEAR = {
     "2026": {"middle": "初一", "high": "高一"},
     "2025": {"middle": "初二", "high": "高二"},
     "2024": {"middle": "初三", "high": "高三"},
@@ -100,7 +100,7 @@ def upload_sha256(upload):
 def _normalize_photo_manifest(value, expected_count):
     if value in (None, "", []):
         if expected_count:
-            return []
+            raise ValidationError("照片清单不能为空，请重新选择照片后提交")
         return []
     if isinstance(value, str):
         try:
@@ -121,6 +121,8 @@ def _normalize_photo_manifest(value, expected_count):
             size = int(item.get("size"))
         except (TypeError, ValueError) as exc:
             raise ValidationError(f"第 {index} 个照片大小不正确") from exc
+        if size < 1:
+            raise ValidationError(f"第 {index} 个照片大小不正确")
         sha256 = str(item.get("sha256") or "").lower()
         if sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256):
             raise ValidationError(f"第 {index} 个照片哈希不正确")
@@ -196,17 +198,34 @@ def _text(value):
 def normalize_school_year(value):
     text = _text(value)
     match = re.fullmatch(r"(20\d{2})(?:[-/]20\d{2})?", text)
-    if not match or match.group(1) not in GRADE_BY_YEAR:
+    if not match or match.group(1) not in LEGACY_GRADE_BY_YEAR:
         raise ValidationError("学年只能填写 2024、2025 或 2026，例如 2026")
     return match.group(1)
 
 
-def grade_for(department_name, school_year):
+def normalize_grade(value, department_name=None):
+    grade = _text(value)
+    valid = {item[0] for item in ClassGroup.GRADES}
+    if grade not in valid:
+        raise ValidationError("年级只能填写初一、初二、初三、高一、高二或高三")
+    if department_name == "初中部" and not grade.startswith("初"):
+        raise ValidationError("初中部只能填写初一、初二或初三")
+    if department_name == "高中部" and not grade.startswith("高"):
+        raise ValidationError("高中部只能填写高一、高二或高三")
+    return grade
+
+
+def legacy_grade_for(department_name, school_year):
     department = "middle" if department_name == "初中部" else "high" if department_name == "高中部" else department_name
     try:
-        return GRADE_BY_YEAR[normalize_school_year(school_year)][department]
+        return LEGACY_GRADE_BY_YEAR[normalize_school_year(school_year)][department]
     except KeyError as exc:
         raise ValidationError("学部只能是初中部或高中部") from exc
+
+
+def grade_for(department_name, school_year):
+    """Legacy compatibility helper for old rosters that omitted the grade column."""
+    return legacy_grade_for(department_name, school_year)
 
 
 def parse_roster(upload):
@@ -245,10 +264,10 @@ def parse_roster(upload):
             row_errors.append("学部只能是初中部或高中部")
         try:
             record["学年"] = normalize_school_year(record.get("学年"))
-            record["年级"] = grade_for(record["学部"], record["学年"])
+            record["年级"] = normalize_grade(record["年级"], record["学部"]) if record.get("年级") else legacy_grade_for(record["学部"], record["学年"])
         except ValidationError as exc:
             row_errors.append(str(exc))
-        if record.get("就读类型") not in {"走读", "半走读", "住宿"}:
+        if record.get("就读类型") not in set(STUDY_TYPE_VALUES):
             row_errors.append("就读类型不正确")
         identity = (record.get("学年"), record.get("学部"), record.get("班级"), record.get("姓名"), record.get("性别"), record.get("就读类型"))
         if identity in seen:
@@ -277,7 +296,7 @@ def _class_from_record(record):
             class_group, _ = ClassGroup.objects.get_or_create(
                 department=department,
                 school_year=school_year,
-                grade=grade_for(record["学部"], record["学年"]),
+                grade=record["年级"],
                 name=record["班级"],
                 defaults={"is_active": True},
             )
@@ -365,19 +384,51 @@ def _check_storage_quota(additional_bytes):
         raise ValidationError(f"文件存储配额不足，当前配额为 {settings.MAX_STORAGE_MB} MB")
 
 
-def _create_submission_records(*, records, roster_name, roster_candidate, photo_inputs, document_inputs, note, ip_address, access_token=None):
-    scopes = {(r.get("学部"), r.get("学年"), r.get("班级")) for r in records}
+def _delete_submission_storage(submission_id):
+    """Remove a private directory left by an interrupted finalization."""
+    root = (Path(settings.MEDIA_ROOT) / "submissions" / str(submission_id)).resolve()
+    media_root = Path(settings.MEDIA_ROOT).resolve()
+    if root == media_root or media_root not in root.parents:
+        return
+    if root.exists():
+        shutil.rmtree(root)
+
+
+def _create_submission_records(*, records, roster_name, roster_candidate, photo_inputs, document_inputs, note, ip_address, access_token=None, expected_student_count=None, expected_photo_count=None, expected_document_count=None):
+    scopes = {(r.get("学部"), r.get("学年"), r.get("年级"), r.get("班级")) for r in records}
     if len(scopes) != 1:
-        raise ValidationError("一次提交只能包含同一学部、学年和班级的学生")
+        raise ValidationError("一次提交只能包含同一学部、学年、年级和班级的学生")
+    if access_token:
+        access_hash = hashlib.sha256(access_token.encode()).hexdigest()
+        existing_submission = _with_db_retry(lambda: Submission.objects.filter(access_token_hash=access_hash).first())
+        if existing_submission is not None:
+            complete = (
+                bool(existing_submission.roster_file.name)
+                and default_storage.exists(existing_submission.roster_file.name)
+                and (expected_student_count is None or existing_submission.students.count() == expected_student_count)
+                and (expected_photo_count is None or existing_submission.photos.count() == expected_photo_count)
+                and (expected_document_count is None or existing_submission.documents.count() == expected_document_count)
+                and all(default_storage.exists(name) for name in existing_submission.photos.values_list("file", flat=True))
+                and all(default_storage.exists(name) for name in existing_submission.documents.values_list("file", flat=True))
+                and AuditLog.objects.filter(action="public_submit", target_type="Submission", target_id=str(existing_submission.id)).exists()
+            )
+            if complete:
+                return existing_submission, access_token
+            partial_id = existing_submission.id
+            existing_files = [existing_submission.roster_file.name]
+            existing_files.extend(existing_submission.photos.values_list("file", flat=True))
+            existing_files.extend(existing_submission.documents.values_list("file", flat=True))
+            existing_submission.delete()
+            _delete_stored_files(existing_files)
+            _delete_submission_storage(partial_id)
     collection_scope = _with_db_retry(lambda: AppSetting.get_value("collection_scope", "all"))
     if collection_scope == "configured":
         missing_scopes = []
-        for department_name, year_name, class_name in scopes:
+        for department_name, year_name, grade_name, class_name in scopes:
             department = "middle" if department_name == "初中部" else "high"
-            grade = grade_for(department_name, year_name)
-            configured = _with_db_retry(lambda: ClassGroup.objects.filter(department=department, school_year__name=year_name, grade=grade, name=class_name, is_active=True).exists())
+            configured = _with_db_retry(lambda: ClassGroup.objects.filter(department=department, school_year__name=year_name, grade=grade_name, name=class_name, is_active=True).exists())
             if not configured:
-                missing_scopes.append(f"{department_name}/{year_name}/{grade}/{class_name}")
+                missing_scopes.append(f"{department_name}/{year_name}/{grade_name}/{class_name}")
         if missing_scopes:
             raise ValidationError("当前仅允许已配置班级提交：" + "、".join(missing_scopes))
 
@@ -510,14 +561,20 @@ def _check_upload_token(session, token):
         raise ValidationError("上传凭证无效")
 
 
-def start_upload_session(*, roster_upload, document_uploads, expected_photo_count=0, photo_manifest=None, roster_fingerprint="", note="", ip_address=None):
+def start_upload_session(*, roster_upload, document_uploads, expected_photo_count=0, expected_document_count=None, photo_manifest=None, roster_fingerprint="", note="", ip_address=None):
     if expected_photo_count < 0 or expected_photo_count > settings.MAX_PHOTOS_PER_SUBMISSION:
         raise ValidationError(f"照片数量不能超过 {settings.MAX_PHOTOS_PER_SUBMISSION} 张")
+    if expected_document_count is None:
+        expected_document_count = len(document_uploads)
+    if expected_document_count < 0 or expected_document_count > settings.MAX_DOCUMENTS_PER_SUBMISSION:
+        raise ValidationError(f"文档数量不能超过 {settings.MAX_DOCUMENTS_PER_SUBMISSION} 个")
     if len(document_uploads) > settings.MAX_DOCUMENTS_PER_SUBMISSION:
         raise ValidationError(f"文档数量不能超过 {settings.MAX_DOCUMENTS_PER_SUBMISSION} 个")
     records = parse_roster(roster_upload)
     normalized_manifest = _normalize_photo_manifest(photo_manifest, expected_photo_count)
     documents = _prepare_documents(document_uploads)
+    if documents and len(documents) != expected_document_count:
+        raise ValidationError("文档清单与文档数量不一致，请重新选择文件")
     _check_storage_quota(roster_upload.size + sum(item.size for item in documents))
     roster_sha256 = upload_sha256(roster_upload)
     token = UploadSession.make_token()
@@ -528,7 +585,7 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         roster_fingerprint=str(roster_fingerprint or "")[:255],
         note=note[:500],
         expected_photo_count=expected_photo_count,
-        expected_document_count=len(documents),
+        expected_document_count=expected_document_count,
         photo_manifest=normalized_manifest,
         photo_manifest_digest=_manifest_json_digest(normalized_manifest),
     )
@@ -545,6 +602,7 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
                 documents,
                 manifest_digest=session.photo_manifest_digest,
                 roster_fingerprint=session.roster_fingerprint,
+                trusted_internal=True,
                 already_prepared=True,
             )
         return session, token, len(records)
@@ -554,7 +612,7 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         raise
 
 
-def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manifest_digest=None, roster_fingerprint=None, already_prepared=False):
+def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manifest_digest=None, roster_fingerprint=None, trusted_internal=False, already_prepared=False):
     if kind not in {"photo", "document"}:
         raise ValidationError("上传批次类型不正确")
     if sequence < 0:
@@ -565,12 +623,16 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manif
         raise ValidationError(f"每批最多上传 {settings.MAX_PHOTOS_PER_BATCH} 张照片")
     if kind == "document" and len(uploads) > settings.MAX_DOCUMENTS_PER_BATCH:
         raise ValidationError(f"每批最多上传 {settings.MAX_DOCUMENTS_PER_BATCH} 个文档")
+    if not trusted_internal and not token:
+        raise ValidationError("上传凭证不能为空")
     prepared = uploads if already_prepared else (_prepare_photos(uploads) if kind == "photo" else _prepare_documents(uploads))
     if sum(item.size for item in prepared) > settings.MAX_BATCH_UPLOAD_SIZE_MB * 1024 * 1024:
         raise ValidationError(f"本批文件总大小不能超过 {settings.MAX_BATCH_UPLOAD_SIZE_MB} MB")
     digest = _manifest_digest(prepared)
     session = UploadSession.objects.get(pk=session_id)
-    if token is not None:
+    if not trusted_internal:
+        _check_upload_token(session, token)
+    elif token is not None:
         _check_upload_token(session, token)
     if session.photo_manifest_digest and manifest_digest != session.photo_manifest_digest:
         raise ValidationError("照片清单已变化，请重新选择 Excel 和照片后提交")
@@ -647,6 +709,14 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manif
         raise
 
 
+def _mark_upload_session_completed(session_id, submission):
+    with transaction.atomic():
+        locked = UploadSession.objects.select_for_update().get(pk=session_id)
+        locked.status = "completed"
+        locked.completed_submission = submission
+        locked.save(update_fields=["status", "completed_submission", "updated_at"])
+
+
 def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_fingerprint=None, ip_address=None):
     session = UploadSession.objects.get(pk=session_id)
     _check_upload_token(session, token)
@@ -661,6 +731,19 @@ def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_f
                 raise ValidationError("Excel 文件已变化，请重新选择 Excel 和照片后提交")
             if locked.status == "completed" and locked.completed_submission_id:
                 return locked.completed_submission, False
+            if locked.status == "finalizing":
+                stable_token = _session_result_token(session_id)
+                recovered = Submission.objects.filter(access_token_hash=hashlib.sha256(stable_token.encode()).hexdigest()).first()
+                stale_at = timezone.now() - timedelta(seconds=settings.UPLOAD_FINALIZING_TIMEOUT_SECONDS)
+                if recovered is not None:
+                    locked.status = "completed"
+                    locked.completed_submission = recovered
+                    locked.save(update_fields=["status", "completed_submission", "updated_at"])
+                    return recovered, False
+                if locked.updated_at > stale_at:
+                    raise ValidationError("上传会话正在完成，请稍后重试")
+                locked.status = "pending"
+                locked.save(update_fields=["status", "updated_at"])
             if locked.status != "pending":
                 raise ValidationError("上传会话正在完成或已结束")
             locked.status = "finalizing"
@@ -698,18 +781,15 @@ def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_f
             note=session.note,
             ip_address=ip_address,
             access_token=result_token,
+            expected_student_count=len(records),
+            expected_photo_count=session.expected_photo_count,
+            expected_document_count=session.expected_document_count,
         )
-        def complete():
-            with transaction.atomic():
-                locked = UploadSession.objects.select_for_update().get(pk=session.id)
-                locked.status = "completed"
-                locked.completed_submission = submission
-                locked.save(update_fields=["status", "completed_submission", "updated_at"])
-        _with_db_retry(complete)
+        _with_db_retry(lambda: _mark_upload_session_completed(session.id, submission))
         _delete_stored_files([roster_path] + [row.file.name for row in photo_rows + document_rows])
         return submission, result_token
     except Exception:
-        UploadSession.objects.filter(pk=session.id, status="finalizing").update(status="pending")
+        _with_db_retry(lambda: UploadSession.objects.filter(pk=session.id, status="finalizing").update(status="pending"))
         raise
 
 
@@ -1004,9 +1084,9 @@ def template_bytes():
     sheet.title = "学生名单"
     last_column = get_column_letter(len(HEADERS))
     sheet.merge_cells(f"A1:{last_column}1")
-    sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、班级、就读类型为必填；年级由学部和学年自动判断。"
+    sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、年级、班级、就读类型为必填；学年是当前在读学年的起始年份，不是入学年份。"
     sheet.merge_cells(f"A2:{last_column}2")
-    sheet["A2"] = "学年填写当前在读学年的起始年份，不是入学年份：2026/2025/2024 分别对应高中高一/高二/高三、初中初一/初二/初三；照片默认按姓名匹配。"
+    sheet["A2"] = "同一学年可填写初一、初二、初三、高一、高二或高三；旧版没有年级列的名单仍按旧学年映射兼容；照片默认按姓名匹配。"
     for cell_ref in ("A1", "A2"):
         sheet[cell_ref].font = Font(bold=True, color="FFFFFF" if cell_ref == "A1" else "17233B")
         sheet[cell_ref].fill = PatternFill("solid", fgColor="17233B" if cell_ref == "A1" else "E8F5F2")
@@ -1015,7 +1095,7 @@ def template_bytes():
         cell = sheet.cell(row=4, column=col, value=header)
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="E76F3C")
-    for col, value in enumerate(["示例同学", "男", "高中部", "2026", "1", "走读", "虚构示例，仅用于测试"], start=1):
+    for col, value in enumerate(["示例同学", "男", "高中部", "2026", "高一", "1", "走读", "虚构示例，仅用于测试"], start=1):
         sheet.cell(row=5, column=col, value=value)
     sheet.freeze_panes = "A5"
     for col in range(1, len(HEADERS) + 1): sheet.column_dimensions[get_column_letter(col)].width = 18
