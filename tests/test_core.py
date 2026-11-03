@@ -110,6 +110,16 @@ def test_upload_gate_closes_public_entry(client):
 
 
 @pytest.mark.django_db
+def test_dashboard_always_shows_clear_rejected_data_button(client):
+    admin = User.objects.create_user(username="dashboard-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    response = client.get(reverse("admin-dashboard"))
+    assert response.status_code == 200
+    assert reverse("clear-test-data") in response.content.decode()
+    assert "清除退回/测试数据（0）" in response.content.decode()
+
+
+@pytest.mark.django_db
 def test_configured_collection_scope_rejects_unlisted_class():
     AppSetting.set_value("collection_scope", "configured")
     rows = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "99", "走读", "", ""]]
