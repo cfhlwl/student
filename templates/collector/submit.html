@@ -3,7 +3,7 @@
 {% block topbar_right %}{% endblock %}
 {% block content %}
 <main class="public-page">
-  <section class="public-title"><div class="eyebrow">统一入口 / 2026 学年</div><h1>赤峰一中学生资料采集</h1><p>请按班级提交学生名单、照片和相关文档。</p><div class="hero-note"><span class="pulse"></span> 当前公开上传：<strong>{% if upload_open %}开放{% else %}已关闭{% endif %}</strong><span class="dot">·</span> 每次提交都会生成独立版本</div></section>
+  <section class="public-title"><h1>赤峰一中学生资料采集</h1></section>
   <section class="process-strip"><div><b>01</b><span>准备名单</span></div><div><b>02</b><span>批量选照片</span></div><div><b>03</b><span>提交并核对</span></div></section>
   {% if form.non_field_errors %}<div class="error-box">{% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
   <form method="post" enctype="multipart/form-data" class="submit-card" id="submit-form">
