@@ -2,13 +2,18 @@ document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('input[type=file]').forEach(function (input) {
     input.addEventListener('change', function () {
       const target = document.querySelector('[data-file-count="' + input.name + '"]');
+      const hint = input.closest('.upload-field')?.querySelector('.file-hint');
+      const defaultHint = input.name === 'roster' ? '点击选择 .xlsx 文件' : input.name === 'photos' ? '点击或拖入照片' : '点击选择文档';
       if (!target) return;
       if (!input.files.length) {
         target.textContent = '';
+        if (hint) hint.textContent = defaultHint;
       } else if (input.multiple) {
         target.textContent = '已选择 ' + input.files.length + ' 个文件';
+        if (hint) hint.textContent = '文件已加入，可继续调整选择';
       } else {
         target.textContent = '已选择：' + input.files[0].name;
+        if (hint) hint.textContent = 'Excel 文件已选择';
       }
     });
   });
