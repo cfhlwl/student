@@ -177,3 +177,22 @@
 - 未修改现有 EasyPrinter、cfyz 生产服务或生产数据库；未部署、未合并、未触发 GitHub Actions。
 - 当前仍等待 ChatGPT 独立复审，`MERGE=HOLD_FOR_CHATGPT`、`DEPLOY=NO`、`R3=WAIT_R2_FINAL_PASS`。
 
+## R2-F8 最后一项定点整改（审查评论 ID 6604644543）
+
+本轮只修复原始 Excel 名单和相关文档导出时的截断 ZIP 成员问题，照片导出、分类目录、命名规则和管理员清空功能未改变。
+
+### RED→GREEN
+
+- RED：旧实现中注入 Excel/PDF 源文件首块后读取异常；旧路径直接向 `archive.open(..., "w")` 写入，最终 ZIP 仍包含残缺成员，两个参数化测试均失败，退出码 1（`2 failed, 22 deselected`）。
+- GREEN：名单和文档均先复用 `_stage_export_file` 完整读取；名单按实际文件大小校验，文档按数据库记录大小校验；只有 staging 成功后才 `archive.write`。源读取异常仅进入对应班级 Excel 的异常记录，不生成 ZIP 成员；ZIP 自身写入异常继续由外层整包删除并失败返回。
+
+| 验收项 | 退出码 / 结果 |
+|---|---:|
+| Excel/PDF/照片中途读取失败定向测试 | 0，3 passed，1.35 秒 |
+| 完整 Docker 自动化回归 | 0，53 passed，23.58 秒 |
+| 100×约3MB Docker+Nginx 回归 | 0，100 张、12 批、数据库/最终磁盘/ZIP 各 100；ZIP 335,109,949 字节；耗时 86.47 秒；客户端峰值 876,168KB；媒体 339,126,137 字节 |
+| 10 班并发+混合资料 Docker+Nginx 回归 | 0，15 张照片+20MB 文档；10 班×20 张；总导出 215 张；ZIP CRC/字节/SHA256/统计表通过 |
+| Django check / 迁移漂移 / Compose config / compileall / diff check | 均为 0 |
+
+F8 定向测试核对了：Excel/PDF 失败时 ZIP 不包含对应名单/文档路径，ZIP 仍可解压，异常工作表记录对应错误；正常照片成员的 CRC、原始字节和 SHA256 保持一致。隔离 Docker 容器、数据库和媒体测试数据已清理，当前等待 ChatGPT 最终独立复审。
+

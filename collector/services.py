@@ -1008,11 +1008,17 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                             suffix = PurePosixPath(roster_name).suffix
                             roster_name = f"{str(submission.id)[:8]}_{stem}{suffix}"
                         roster_names.add(roster_name)
+                        staged_roster = None
                         try:
-                            with submission.roster_file.open("rb") as source, archive.open(f"{class_dir}/学生名单/{roster_name}", "w") as target:
-                                shutil.copyfileobj(source, target, length=1024 * 1024)
-                        except (FileNotFoundError, OSError, ValueError) as exc:
+                            staged_roster = _stage_export_file(submission.roster_file, expected_size=submission.roster_file.size)
+                        except (ExportFileError, FileNotFoundError, OSError, ValueError) as exc:
                             class_file_anomalies.append(("文件缺失", "学生名单", f"{roster_name}：{exc}"))
+                        else:
+                            # Do not create the ZIP member until the complete source is staged.
+                            archive.write(staged_roster, f"{class_dir}/学生名单/{roster_name}")
+                        finally:
+                            if staged_roster is not None:
+                                staged_roster.unlink(missing_ok=True)
 
                 document_names = set()
                 for document in SubmissionDocument.objects.filter(submission__in=class_submissions).distinct():
@@ -1022,11 +1028,17 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                         suffix = PurePosixPath(document_name).suffix
                         document_name = f"{str(document.id)}_{stem}{suffix}"
                     document_names.add(document_name)
+                    staged_document = None
                     try:
-                        with document.file.open("rb") as source, archive.open(f"{class_dir}/相关文档/{document_name}", "w") as target:
-                            shutil.copyfileobj(source, target, length=1024 * 1024)
-                    except (FileNotFoundError, OSError, ValueError) as exc:
+                        staged_document = _stage_export_file(document.file, expected_size=document.size)
+                    except (ExportFileError, FileNotFoundError, OSError, ValueError) as exc:
                         class_file_anomalies.append(("文件缺失", "相关文档", f"{document_name}：{exc}"))
+                    else:
+                        # Archive I/O errors intentionally escape and roll back the whole temporary ZIP.
+                        archive.write(staged_document, f"{class_dir}/相关文档/{document_name}")
+                    finally:
+                        if staged_document is not None:
+                            staged_document.unlink(missing_ok=True)
 
                 category_groups = defaultdict(list)
                 if split_study_types:

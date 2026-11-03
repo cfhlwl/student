@@ -538,6 +538,38 @@ def test_export_source_read_failure_has_no_partial_photo_member(settings, tmp_pa
         temp_path.unlink(missing_ok=True)
 
 
+@pytest.mark.parametrize("target", ["roster", "document"])
+def test_export_roster_and_document_read_failure_has_no_partial_member(settings, tmp_path, monkeypatch, target):
+    settings.MEDIA_ROOT = tmp_path
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    documents = [document_file("中途失败.pdf")] if target == "document" else []
+    submission = complete_submission([["名单文档失败", "女", "高中部", "2026", "高一", "F8", "走读", ""]], [photo_file("名单文档失败.jpg")], documents)
+    admin = User.objects.create(username=f"r2-f8-{target}")
+    review_submission_version(submission_id=submission.id, action="approved", actor=admin)
+    target_name = submission.roster_file.name if target == "roster" else submission.documents.get().file.name
+    original_stage = services._stage_export_file
+
+    def fail_target(file_field, **kwargs):
+        staged = original_stage(file_field, **kwargs)
+        if file_field.name == target_name:
+            staged.write_bytes(staged.read_bytes()[:1])
+            staged.unlink(missing_ok=True)
+            raise services.ExportFileError(f"模拟{target}在首块后读取失败")
+        return staged
+
+    monkeypatch.setattr(services, "_stage_export_file", fail_target)
+    temp_path, _, _ = export_students_to_tempfile({"school_year__name": "2026"}, actor=admin)
+    try:
+        with zipfile.ZipFile(temp_path) as archive:
+            assert archive.testzip() is None
+            assert not any(f"/{'学生名单' if target == 'roster' else '相关文档'}/" in name for name in archive.namelist())
+            stats = next(name for name in archive.namelist() if name.endswith("学生统计表.xlsx"))
+            book = load_workbook(io.BytesIO(archive.read(stats)), data_only=True)
+            assert any(f"模拟{target}" in str(row[2].value or "") for row in book["异常记录"].iter_rows(min_row=2))
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def test_study_type_contract_has_no_non_boarding_value():
     assert [value for value, _ in Student.STUDY_TYPES] == ["走读", "半走读", "住宿"]
     with pytest.raises(ValidationError):
