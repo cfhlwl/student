@@ -46,6 +46,8 @@ docker compose exec web python manage.py create_admin admin
 
 示例 Compose 暴露 `8080`，生产 Nginx/网关应终止 HTTPS 并转发到该端口。部署后检查 `/submit`、`/admin/login/`，确认没有公开 `/media/` 路由。
 
+如果只是内网 IP 验收，可将 `.env` 中 `HTTPS_ENABLED=0`，并把 `CSRF_TRUSTED_ORIGINS` 设置为 `http://192.168.88.99:8080`；正式生产必须恢复 `HTTPS_ENABLED=1` 并通过 HTTPS 访问。
+
 ## 备份、恢复和清理
 
 备份 SQLite 和私有文件：
