@@ -1,5 +1,7 @@
 from django.urls import path
 
+from .password_views import admin_password_change
+
 from .views import (
     StaffLoginView, StaffLogoutView, admin_classes, admin_dashboard, admin_naming, admin_statistics, admin_statistics_exceptions, admin_students,
     admin_submissions, clear_test_data, download_template, export_zip, manual_match, manual_supplement_match, protected_document, protected_photo, public_submit, review_submission, review_supplement, submit_preflight, submit_preflight_page, submit_result, submit_supplement, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start, upload_status,
@@ -19,6 +21,7 @@ urlpatterns = [
     path("submit/result/<uuid:submission_id>/supplement/", submit_supplement, name="submit-supplement"),
     path("admin/login/", StaffLoginView.as_view(), name="admin-login"),
     path("admin/logout/", StaffLogoutView.as_view(), name="admin-logout"),
+    path("admin/password/change/", admin_password_change, name="admin-password-change"),
     path("admin/", admin_dashboard, name="admin-dashboard"),
     path("admin/statistics/", admin_statistics, name="admin-statistics"),
     path("admin/statistics/exceptions.xlsx", admin_statistics_exceptions, name="admin-statistics-exceptions"),
