@@ -10,8 +10,8 @@ from django.urls import reverse
 from openpyxl import load_workbook
 
 from collector.backup import clear_collection_safely, create_backup
-from collector.maintenance import MaintenanceError, collection_write_gate, read_state, write_state
-from collector.models import AppSetting, Submission
+from collector.maintenance import MaintenanceError, collection_write_gate, public_upload_is_open, read_state, write_state
+from collector.models import AppSetting, ClassGroup, NamingRule, SchoolYear, Submission
 from collector.security_controls import classify_rate_limit, consume_rate_limit
 from collector.services import create_submission
 from tests.test_core import excel_upload, image_upload
@@ -75,6 +75,70 @@ def test_clear_failure_restores_database_and_media(settings, tmp_path, monkeypat
     assert Submission.objects.filter(pk=submission.pk).exists()
     assert original in [path.read_bytes() for path in settings.MEDIA_ROOT.rglob("*.jpg")]
     assert read_state() == "open"
+
+
+@pytest.mark.django_db
+def test_clear_success_gate_admin_display_and_single_reopen(client, settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path / "media"
+    settings.COLLECTION_BACKUP_DIR = tmp_path / "backups"
+    admin = User.objects.create_user(username="f2a-admin", password="correct-password-123", is_staff=True)
+    AppSetting.set_value("public_upload_open", True)
+    write_state("open")
+    assert client.login(username=admin.username, password="correct-password-123")
+
+    response = client.post(reverse("clear-test-data"), {"confirm_clear": "YES", "admin_password": "correct-password-123"})
+    assert response.status_code == 302
+    assert read_state() == "closed"
+    assert not public_upload_is_open()
+    dashboard = client.get(reverse("admin-dashboard"))
+    body = dashboard.content.decode()
+    assert "开启公开上传" in body
+    assert "关闭公开上传" not in body
+    assert client.get(reverse("submit")).status_code == 403
+
+    response = client.post(reverse("toggle-upload"))
+    assert response.status_code == 302
+    assert read_state() == "open"
+    assert public_upload_is_open()
+    dashboard = client.get(reverse("admin-dashboard"))
+    body = dashboard.content.decode()
+    assert "关闭公开上传" in body
+    assert client.get(reverse("submit")).status_code == 200
+
+
+@pytest.mark.django_db
+def test_admin_config_writes_are_blocked_when_collection_closed(client, settings, tmp_path):
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "maintenance.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "maintenance.lock"
+    admin = User.objects.create_user(username="f2b-admin", password="password-123456", is_staff=True)
+    assert client.login(username=admin.username, password="password-123456")
+    write_state("closed")
+
+    naming_response = client.post(reverse("admin-naming"), {
+        "mode": "name", "template": "{姓名}", "male_code": "01", "female_code": "02", "separator": "",
+    })
+    assert naming_response.status_code in {200, 302}
+    assert NamingRule.objects.count() == 0
+
+    classes_response = client.post(reverse("admin-classes"), {
+        "school_year": "2026", "department": "high", "grade": "高一", "name": "F2班",
+    })
+    assert classes_response.status_code == 302
+    assert SchoolYear.objects.count() == 0
+    assert ClassGroup.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_admin_naming_get_is_read_only(client, settings, tmp_path):
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "maintenance.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "maintenance.lock"
+    admin = User.objects.create_user(username="f2b-read", password="password-123456", is_staff=True)
+    assert client.login(username=admin.username, password="password-123456")
+    write_state("open")
+    assert NamingRule.objects.count() == 0
+    response = client.get(reverse("admin-naming"))
+    assert response.status_code == 200
+    assert NamingRule.objects.count() == 0
 
 
 def test_exclusive_maintenance_gate_waits_for_existing_writer(settings, tmp_path):

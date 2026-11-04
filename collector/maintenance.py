@@ -17,6 +17,7 @@ from functools import wraps
 from pathlib import Path
 
 from django.conf import settings
+from .models import AppSetting
 
 try:  # pragma: no cover - exercised in the Linux Docker image
     import fcntl
@@ -56,6 +57,11 @@ def write_state(state: str) -> None:
     temporary = path.with_name(path.name + f".tmp-{os.getpid()}-{threading.get_ident()}")
     temporary.write_text(json.dumps({"state": state}, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def public_upload_is_open() -> bool:
+    """Return the effective public-upload state from both persistent gates."""
+    return read_state() == "open" and AppSetting.get_bool("public_upload_open", True)
 
 
 @contextmanager

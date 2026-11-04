@@ -17,7 +17,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .backup import BackupError, clear_collection_safely
-from .maintenance import MaintenanceError, collection_write_gate, read_state, write_state
+from .maintenance import MaintenanceError, collection_maintenance_gate, collection_write_gate, public_upload_is_open, read_state, write_state
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
 from .preflight import run_preflight
@@ -267,7 +267,7 @@ def admin_dashboard(request):
         "student_count": students.count(), "photo_count": students.filter(match_status="matched").count(),
         "missing_count": students.exclude(match_status="matched").count(), "pending_count": Submission.objects.filter(status="pending").count(),
         "rejected_count": Submission.objects.filter(status="rejected").count(),
-        "class_stats": class_stats, "upload_open": AppSetting.get_bool("public_upload_open", True),
+        "class_stats": class_stats, "upload_open": public_upload_is_open(),
     }
     return render(request, "collector/admin_dashboard.html", context)
 
@@ -420,22 +420,26 @@ def export_zip(request):
 
 @staff_required
 def admin_naming(request):
-    rule = NamingRule.current()
+    rule = NamingRule.objects.first() or NamingRule()
     if request.method == "POST":
         form = NamingRuleForm(request.POST)
         if form.is_valid():
-            rule.mode = form.cleaned_data["mode"]
-            rule.template = form.cleaned_data["template"]
-            rule.male_code = form.cleaned_data["male_code"]
-            rule.female_code = form.cleaned_data["female_code"]
-            rule.separator = form.cleaned_data["separator"]
             try:
-                validate_naming_rule(rule)
+                with collection_write_gate():
+                    rule = NamingRule.objects.first() or NamingRule()
+                    rule.mode = form.cleaned_data["mode"]
+                    rule.template = form.cleaned_data["template"]
+                    rule.male_code = form.cleaned_data["male_code"]
+                    rule.female_code = form.cleaned_data["female_code"]
+                    rule.separator = form.cleaned_data["separator"]
+                    validate_naming_rule(rule)
+                    rule.updated_by = request.user
+                    rule.save()
             except ValidationError as exc:
                 form.add_error("template", str(exc))
+            except MaintenanceError as exc:
+                messages.error(request, str(exc))
             else:
-                rule.updated_by = request.user
-                rule.save()
                 messages.success(request, "照片命名规则已保存。")
                 return redirect("admin-naming")
     else:
@@ -446,15 +450,21 @@ def admin_naming(request):
 @require_POST
 @staff_required
 def toggle_upload(request):
-    current = AppSetting.get_bool("public_upload_open", True)
-    opening = not current
-    if opening:
-        # Re-opening after a successful clear is an explicit administrator
-        # action; ordinary public-upload toggles do not alter this marker.
-        write_state("open")
-    AppSetting.set_value("public_upload_open", opening)
-    AuditLog.objects.create(actor=request.user, action="toggle_public_upload", detail={"open": not current}, ip_address=client_ip(request))
-    messages.success(request, "公开上传已" + ("开启" if not current else "关闭") + "。")
+    try:
+        with collection_maintenance_gate() as previous_state:
+            if previous_state == "clearing":
+                raise MaintenanceError("资料正在清空或恢复，请稍后再试")
+            current = previous_state == "open" and AppSetting.get_bool("public_upload_open", True)
+            opening = not current
+            AppSetting.set_value("public_upload_open", opening)
+            # Keep the state-file gate open for normal toggling. A successful
+            # clear leaves it closed, and this explicit action reopens it.
+            write_state("open")
+            AuditLog.objects.create(actor=request.user, action="toggle_public_upload", detail={"open": opening}, ip_address=client_ip(request))
+    except MaintenanceError as exc:
+        messages.error(request, str(exc))
+        return redirect("admin-dashboard")
+    messages.success(request, "公开上传已" + ("开启" if opening else "关闭") + "。")
     return redirect("admin-dashboard")
 
 
@@ -482,26 +492,31 @@ def clear_test_data(request):
 @staff_required
 def admin_classes(request):
     if request.method == "POST":
-        if request.POST.get("action") == "set_scope":
-            scope = request.POST.get("scope", "all")
-            AppSetting.set_value("collection_scope", "configured" if scope == "configured" else "all")
-            AuditLog.objects.create(actor=request.user, action="set_collection_scope", detail={"scope": AppSetting.get_value("collection_scope")}, ip_address=client_ip(request))
-            messages.success(request, "采集范围已切换为" + ("仅已配置班级" if scope == "configured" else "全校全部范围") + "。")
-            return redirect("admin-classes")
-        year_name = request.POST.get("school_year", "").strip()
-        department = request.POST.get("department", "")
-        grade_name = request.POST.get("grade", "").strip()
-        class_name = request.POST.get("name", "").strip()
-        if year_name and department and class_name:
-            try:
-                year_name = normalize_school_year(year_name)
-                grade = normalize_grade(grade_name, "初中部" if department == "middle" else "高中部") if grade_name else grade_for(department, year_name)
-            except ValidationError as exc:
-                messages.error(request, str(exc))
-            else:
-                year, _ = SchoolYear.objects.get_or_create(name=year_name, defaults={"is_active": True})
-                ClassGroup.objects.get_or_create(department=department, school_year=year, grade=grade, name=class_name, defaults={"is_active": True})
-                messages.success(request, "班级范围已保存，年级为" + grade + "。")
+        try:
+            with collection_write_gate():
+                if request.POST.get("action") == "set_scope":
+                    scope = request.POST.get("scope", "all")
+                    AppSetting.set_value("collection_scope", "configured" if scope == "configured" else "all")
+                    AuditLog.objects.create(actor=request.user, action="set_collection_scope", detail={"scope": AppSetting.get_value("collection_scope")}, ip_address=client_ip(request))
+                    messages.success(request, "采集范围已切换为" + ("仅已配置班级" if scope == "configured" else "全校全部范围") + "。")
+                    return redirect("admin-classes")
+                year_name = request.POST.get("school_year", "").strip()
+                department = request.POST.get("department", "")
+                grade_name = request.POST.get("grade", "").strip()
+                class_name = request.POST.get("name", "").strip()
+                if year_name and department and class_name:
+                    try:
+                        year_name = normalize_school_year(year_name)
+                        grade = normalize_grade(grade_name, "初中部" if department == "middle" else "高中部") if grade_name else grade_for(department, year_name)
+                    except ValidationError as exc:
+                        messages.error(request, str(exc))
+                    else:
+                        year, _ = SchoolYear.objects.get_or_create(name=year_name, defaults={"is_active": True})
+                        ClassGroup.objects.get_or_create(department=department, school_year=year, grade=grade, name=class_name, defaults={"is_active": True})
+                        messages.success(request, "班级范围已保存，年级为" + grade + "。")
+                    return redirect("admin-classes")
+        except MaintenanceError as exc:
+            messages.error(request, str(exc))
             return redirect("admin-classes")
     return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all(), "collection_scope": AppSetting.get_value("collection_scope", "all")})
 
