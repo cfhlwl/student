@@ -27,6 +27,23 @@ class BackupError(RuntimeError):
     pass
 
 
+def _replace_directory_contents(source: Path, target: Path) -> None:
+    """Replace a directory's contents without removing a Docker mountpoint."""
+    target.mkdir(parents=True, exist_ok=True)
+    for child in target.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink(missing_ok=True)
+    if source.exists():
+        for child in source.iterdir():
+            destination = target / child.name
+            if child.is_dir() and not child.is_symlink():
+                shutil.copytree(child, destination)
+            else:
+                shutil.copy2(child, destination)
+
+
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -156,6 +173,7 @@ def restore_backup(archive_path: str | Path, *, database_path: str | Path | None
     rollback = Path(tempfile.mkdtemp(prefix="restore-rollback-", dir=staging.parent))
     old_db = rollback / "db.sqlite3"
     old_media = rollback / "media"
+    temp_media = None
     try:
         manifest = _read_verified_archive(Path(archive_path), staging)
         if database.exists():
@@ -173,19 +191,18 @@ def restore_backup(archive_path: str | Path, *, database_path: str | Path | None
             shutil.copytree(staging / "media", temp_media)
         else:
             temp_media.mkdir(parents=True)
-        if media.exists():
-            shutil.rmtree(media)
-        os.replace(temp_media, media)
+        _replace_directory_contents(temp_media, media)
+        shutil.rmtree(temp_media, ignore_errors=True)
         return manifest
     except Exception as exc:
         if old_db.exists():
             shutil.copy2(old_db, database)
         if old_media.exists():
-            if media.exists():
-                shutil.rmtree(media)
-            shutil.copytree(old_media, media)
+            _replace_directory_contents(old_media, media)
         raise BackupError(str(exc)) from exc
     finally:
+        if temp_media is not None:
+            shutil.rmtree(temp_media, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
         shutil.rmtree(rollback, ignore_errors=True)
 

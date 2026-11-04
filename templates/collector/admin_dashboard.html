@@ -5,7 +5,7 @@
   <div><div class="eyebrow">采集总览 / 现在</div><h1>资料采集进度</h1></div>
   <div class="heading-actions">
     <form method="post" action="{% url 'toggle-upload' %}">{% csrf_token %}<button class="button {% if upload_open %}danger{% else %}primary{% endif %}" type="submit">{% if upload_open %}关闭公开上传{% else %}开启公开上传{% endif %}</button></form>
-    <form method="post" action="{% url 'clear-test-data' %}" onsubmit="return confirm('此操作将清空所有提交、学生、照片、文档、学年班级配置、命名设置和采集日志，仅保留管理员账号。确定继续吗？');">{% csrf_token %}<button class="button ghost" type="submit">清空全部采集数据</button></form>
+    <form method="post" action="{% url 'clear-test-data' %}" onsubmit="return confirm('此操作将先备份，再清空所有提交、学生、照片、文档、学年班级配置、命名设置和采集日志，仅保留管理员账号。确定继续吗？');">{% csrf_token %}<input type="hidden" name="confirm_clear" value="YES"><button class="button ghost" type="submit">清空全部采集数据</button></form>
   </div>
 </div>
 <div class="metric-grid"><div class="metric"><span>已采用学生</span><strong>{{ student_count }}</strong></div><div class="metric accent"><span>已匹配照片</span><strong>{{ photo_count }}</strong></div><div class="metric warn"><span>缺漏 / 失败</span><strong>{{ missing_count }}</strong></div><div class="metric"><span>待审核版本</span><strong>{{ pending_count }}</strong></div></div>

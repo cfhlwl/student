@@ -1260,7 +1260,9 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     if filters.get("has_photo") == "no": students = [s for s in students if not (s.match_status == "matched" and hasattr(s, "photo"))]
     rule = validate_naming_rule(NamingRule.current())
     groups = defaultdict(list)
-    for student in students: groups[(student.department, student.grade, student.class_name)].append(student)
+    # 学年是导出范围的一部分；同名班级在不同学年必须落入不同目录。
+    for student in students:
+        groups[(student.school_year.name, student.department, student.grade, student.class_name)].append(student)
     Path(settings.EXPORT_TEMP_DIR).mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix="student-export-", suffix=".zip", dir=settings.EXPORT_TEMP_DIR)
     os.close(fd)
@@ -1270,8 +1272,8 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     try:
         with zipfile.ZipFile(temp_name, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
             for group_key, group_students in groups.items():
-                dept, grade, class_name = group_key
-                class_dir = "/".join(safe_filename(v) for v in [_department_code(dept), grade, class_name])
+                school_year, dept, grade, class_name = group_key
+                class_dir = "/".join(safe_filename(v) for v in [school_year, _department_code(dept), grade, class_name])
                 class_submissions = list(Submission.objects.filter(students__in=group_students).distinct())
                 class_file_anomalies = []
                 roster_names = set()

@@ -15,9 +15,12 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
+from .backup import BackupError, clear_collection_safely
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
-from .services import ValidationError, clear_all_collection_data, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
+from .preflight import run_preflight
+from .services import ValidationError, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
+from .statistics import build_admin_statistics_context, build_exception_workbook
 
 
 def client_ip(request):
@@ -61,6 +64,20 @@ def public_submit(request):
     else:
         form = SubmissionForm()
     return render(request, "collector/submit.html", {"form": form})
+
+
+@require_GET
+def submit_preflight_page(request):
+    return render(request, "collector/submit_preflight.html", {"preflight_endpoint": reverse("submit-preflight")})
+
+
+@require_POST
+def submit_preflight(request):
+    result = run_preflight(request.FILES.get("roster"), request.FILES.getlist("photos"))
+    response = JsonResponse(result.as_dict())
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
 
 
 @require_POST
@@ -254,6 +271,26 @@ def admin_dashboard(request):
 
 
 @staff_required
+def admin_statistics(request):
+    context = build_admin_statistics_context(request.GET)
+    query = request.GET.urlencode()
+    context["exception_export_url"] = reverse("admin-statistics-exceptions") + (("?" + query) if query else "")
+    return render(request, "collector/admin_statistics.html", context)
+
+
+@require_GET
+@staff_required
+def admin_statistics_exceptions(request):
+    response = HttpResponse(
+        build_exception_workbook(request.GET),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = "attachment; filename=collection-exceptions.xlsx"
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+@staff_required
 def admin_submissions(request):
     submissions = Submission.objects.select_related("class_group", "school_year", "reviewed_by").all()
     if request.GET.get("status"): submissions = submissions.filter(status=request.GET["status"])
@@ -412,8 +449,17 @@ def toggle_upload(request):
 @require_POST
 @staff_required
 def clear_test_data(request):
-    counts = clear_all_collection_data()
-    messages.success(request, f"已初始化数据库：清除提交 {counts['submissions']} 个、学生 {counts['students']} 条、照片 {counts['photos']} 张、文档 {counts['documents']} 个、学生名单 {counts['rosters']} 个及全部采集配置；管理员账号已保留。")
+    if request.POST.get("confirm_clear") != "YES":
+        messages.error(request, "清空操作未确认，未删除任何资料。")
+        return redirect("admin-dashboard")
+    backup_dir = Path(getattr(settings, "COLLECTION_BACKUP_DIR", settings.BASE_DIR / "data" / "backups"))
+    backup_path = backup_dir / f"before-clear-{timezone.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    try:
+        counts = clear_collection_safely(backup_path)
+    except (BackupError, OSError) as exc:
+        messages.error(request, f"清空未完成，资料未删除；备份或一致性检查失败：{exc}")
+        return redirect("admin-dashboard")
+    messages.success(request, f"已先备份并初始化数据库：清除提交 {counts['submissions']} 个、学生 {counts['students']} 条、照片 {counts['photos']} 张、文档 {counts['documents']} 个、学生名单 {counts['rosters']} 个；管理员账号已保留。备份：{backup_path.name}")
     return redirect("admin-dashboard")
 
 

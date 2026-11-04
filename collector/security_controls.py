@@ -71,6 +71,8 @@ def classify_rate_limit(path: str, method: str) -> str | None:
     clean = path.rstrip("/") or "/"
     if clean == "/submit":
         return "submit"
+    if clean == "/submit/preflight/check":
+        return "submit"
     if clean == "/submit/upload/start":
         return "upload_start"
     if clean.endswith("/photos") and "/submit/upload/" in clean:
