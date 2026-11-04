@@ -10,4 +10,10 @@ staticfiles
 .env
 .r2-data
 .r2-media
+.playwright-cli
+output
+.r3-final-data
+.r3-final-media
+.r3-final2-data
+.r3-final2-media
 
