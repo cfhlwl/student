@@ -95,6 +95,25 @@ def test_password_change_keeps_current_session_and_revokes_old_password(client):
 
 
 @pytest.mark.django_db
+def test_password_change_never_updates_another_administrator(client):
+    current = _staff(username="current-admin")
+    other = _staff(username="another-admin")
+    client.force_login(current)
+    data = _password_data()
+    data["user_id"] = str(other.pk)
+    data["username"] = other.username
+
+    response = client.post(reverse("admin-password-change"), data)
+    assert response.status_code == 302
+    current.refresh_from_db()
+    other.refresh_from_db()
+    assert current.check_password(NEW_PASSWORD)
+    assert other.check_password(OLD_PASSWORD)
+    assert not other.check_password(NEW_PASSWORD)
+    assert AuditLog.objects.filter(action="admin_password_change", actor=current).count() == 1
+
+
+@pytest.mark.django_db
 def test_password_change_is_csrf_protected():
     admin = _staff()
     client = Client(enforce_csrf_checks=True)
