@@ -1,8 +1,34 @@
 {% extends 'collector/base.html' %}
+{% load static %}
 {% block title %}提交结果 · {{ site_name }}{% endblock %}
 {% block content %}
-<main class="narrow-page"><div class="eyebrow">仅限本次提交版本</div><h1>匹配结果</h1><p class="lede">提交编号：<code>{{ submission.id }}</code> · 状态：{{ submission.get_status_display }}</p>
-<section class="panel supplement-panel"><h2>补传缺失照片</h2><p>仅可补传本次提交版本中缺失或待确认的照片；补传后需管理员审核，不会静默覆盖已采用照片。</p><form method="post" enctype="multipart/form-data" action="{% url 'submit-supplement' submission.id %}">{% csrf_token %}<input type="hidden" name="token" value="{{ request.GET.token }}"><input type="file" name="photos" accept=".jpg,.jpeg,.png" multiple required><button class="button primary" type="submit">提交补传</button></form>{% for supplement in supplements %}<div class="supplement-row"><strong>{{ supplement.created_at|date:'Y-m-d H:i' }} 补传</strong><span class="status status-{{ supplement.status }}">{{ supplement.get_status_display }}</span><span>{{ supplement.photos.count }} 张照片</span></div>{% endfor %}</section>
-<div class="result-list">{% for student in students %}<div class="result-row"><div><strong>{{ student.name }}</strong><span>{{ student.class_name }} · {{ student.study_type }}</span></div><span class="status status-{{ student.match_status }}">{{ student.get_match_status_display }}</span></div>{% empty %}<p>没有学生记录。</p>{% endfor %}</div><a class="back-link" href="{% url 'submit' %}">返回统一入口</a></main>
+<main class="narrow-page result-page">
+  <div class="eyebrow">仅限本次提交版本</div>
+  <h1>匹配结果</h1>
+  <p class="lede">提交编号：<code>{{ submission.id }}</code> · 状态：{{ submission.get_status_display }}</p>
+
+  <section class="result-summary" aria-label="匹配汇总">
+    <div><span>学生总数</span><strong data-summary="total">{{ students|length }}</strong></div>
+    <div class="summary-good"><span>已匹配</span><strong data-summary="matched">—</strong></div>
+    <div class="summary-warn"><span>缺少照片</span><strong data-summary="missing">—</strong></div>
+    <div class="summary-alert"><span>待人工确认</span><strong data-summary="ambiguous">—</strong></div>
+  </section>
+
+  <section class="panel supplement-panel">
+    <div class="panel-heading"><div><span class="kicker">补传入口</span><h2>补传缺失照片</h2></div><span class="status status-pending">需管理员审核</span></div>
+    <p>仅可补传本次提交版本中缺失或待确认的照片；补传后需管理员审核，不会静默覆盖已采用照片。</p>
+    <form method="post" enctype="multipart/form-data" action="{% url 'submit-supplement' submission.id %}">
+      {% csrf_token %}<input type="hidden" name="token" value="{{ request.GET.token }}"><input type="file" name="photos" accept=".jpg,.jpeg,.png" multiple required><button class="button primary" type="submit">提交补传</button>
+    </form>
+    {% for supplement in supplements %}<div class="supplement-row"><strong>{{ supplement.created_at|date:'Y-m-d H:i' }} 补传</strong><span class="status status-{{ supplement.status }}">{{ supplement.get_status_display }}</span><span>{{ supplement.photos.count }} 张照片</span></div>{% empty %}<p class="empty supplement-empty">还没有补传记录。</p>{% endfor %}
+  </section>
+
+  <section class="result-list-panel">
+    <div class="result-toolbar"><div><span class="kicker">逐项核对</span><h2>学生资料</h2></div><div class="result-filters" role="group" aria-label="按匹配状态筛选"><button type="button" class="filter-chip is-active" data-result-filter="all" aria-pressed="true">全部</button><button type="button" class="filter-chip" data-result-filter="matched" aria-pressed="false">已匹配</button><button type="button" class="filter-chip" data-result-filter="missing" aria-pressed="false">缺少照片</button><button type="button" class="filter-chip" data-result-filter="ambiguous" aria-pressed="false">待人工确认</button></div></div>
+    <div class="result-list">{% for student in students %}<div class="result-row" data-result-row data-match-status="{{ student.match_status }}"><div><strong>{{ student.name }}</strong><span>{{ student.class_name }} · {{ student.study_type }}</span></div><span class="status status-{{ student.match_status }}">{{ student.get_match_status_display }}</span></div>{% empty %}<p class="empty">没有学生记录。</p>{% endfor %}<p class="empty result-filter-empty" data-result-filter-empty hidden>没有符合当前筛选条件的学生。</p></div>
+  </section>
+  <a class="back-link" href="{% url 'submit' %}">返回统一入口</a>
+</main>
 {% endblock %}
+{% block scripts %}<script src="{% static 'js/clipboard.js' %}" defer></script>{% endblock %}
 
