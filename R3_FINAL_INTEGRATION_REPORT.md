@@ -2,9 +2,9 @@
 
 基线：R3-A `b80ac31438a6ee44e3544c421273b9d620ef030c`
 
-最新集成：`942c728af8cc9a5d75605d8d9f62c75499b9a3a9`
+本轮修复提交：`8f0275274d2bc4b30d5c1aa314cccf7a70ce8b8a`
 
-最新树：`1484afb800e3c66773556b2b4e3e60255b2af586`
+本轮修复树：`4a63496578cfa461a74f87ad43e7cb719a865583`
 
 ## 工作线提交
 
@@ -14,32 +14,46 @@
 | B 管理统计 | #4 | `3046dca78021302cd72e74564d3a459185b3822f` | `25e0f8b2e709e67e109d60dbf4883cdc847e5eca` | PASS |
 | C UI | #6 | `1f97b46801e79c4f9ad8fa850179366edae733c0` | `1a174dd1c6e6340d3499d9d092c849c8e4404e08` | PASS |
 | D 安全/备份 | #7 | `1ffeb815de3b1f47885da99cb9eeaec1463d5b50` | `3f1f91234603a541dc1662ca09954b663c13bf92` | PASS_SCOPED |
-| E 集成 | #8 | `942c728af8cc9a5d75605d8d9f62c75499b9a3a9` | `1484afb800e3c66773556b2b4e3e60255b2af586` | PASS_LOCAL |
+| E 集成 | #8 | `8f0275274d2bc4b30d5c1aa314cccf7a70ce8b8a` | `4a63496578cfa461a74f87ad43e7cb719a865583` | PASS_LOCAL |
 
 ## RED → GREEN
 
 - A/B/C/D 各专项保留了独立 RED 失败记录及 GREEN 退出码。
-- 集成后的 Docker 全量：`86 passed`，exit `0`。
-- 集成专项（安全/备份、预检查、管理统计、UI、跨学年、清空）：`9 passed`，exit `0`。
-- Django check、迁移检查、Python compileall、三个 JavaScript 语法检查、`git diff --check` 均 exit `0`。
+- 集成后的 Docker 全量：`93 passed`，exit `0`。
+- F1～F5 定向测试：`7 passed`，exit `0`；首轮 RED 包含旧测试未传密码、预检查静态文件未加载和错误测试编号，均已修正后复跑 GREEN。
+- Django check、迁移检查、Python compileall、JavaScript 语法检查、`git diff --check` 均 exit `0`。
 
 ## 真实联验
 
-- Docker + Nginx：10 班并发，10×20 张照片，混合文档，215 张总导出；数据库、媒体文件、SHA256、ZIP CRC、统计表通过，exit `0`。
 - Docker + Nginx：100×约 3MB JPEG，12 批，数据库/磁盘/ZIP 均 100 张；失败批次、重试、重复请求、管理员审核和 ZIP SHA256/CRC 通过，exit `0`。
-- Docker + Nginx：300 张小型虚构 JPEG，按 20 张一批共 15 批，数据库和 ZIP 均 300 张，分类统计通过，exit `0`。
-- 50 张、R2/R3-A 的 300 边界及补传矩阵沿用 R3-A 已验收证据，并由当前 86 项回归覆盖服务端契约。
-- Playwright 桌面和 390×844 手机页通过；拍摄示例弹窗可打开，上传页文件选择提示、导航和按钮可见。截图保存在 `output/playwright/`。
+- Docker + Nginx：300×约 3MB JPEG，预检查 300 张、正式上传 34 批，数据库/磁盘/ZIP 均 300 张；ZIP 约 1,005,305,312 字节，CRC 与统计表通过，exit `0`。
+- Docker + Nginx：全新隔离容器 10 班并发、每班 20 张并混合 20MB 文档；总导出 215 张，数据库、媒体、SHA256、ZIP CRC、统计表通过，exit `0`。
+- 50 张、R2/R3-A 的边界及补传矩阵由当前 93 项回归覆盖服务端契约。
+- Playwright 桌面和 390×844 手机页通过；继续提交按钮实际跳转 `/submit?from=preflight`，并提示重新选择文件。截图保存在 `output/playwright/`。
 - Docker 备份/恢复：SQLite online backup、媒体 SHA256 清单、ZIP CRC 和 Docker `/app/media` 挂载点恢复通过，exit `0`。
-- 清空验收：曾发现 UploadSession/StagedUpload 残留，已修复；最新专项测试确认提交、学生、照片、文档、补传、上传会话、暂存记录和媒体内容清零，管理员账号保留。
+- 清空验收：错误/缺失密码均零数据库和媒体修改；正确密码先取得跨 Worker 独占维护门禁、生成唯一不覆盖的备份，成功后保持关闭，管理员账号保留；失败注入会从已校验备份恢复 SQLite 与媒体。
 
 ## 关键集成修复
 
 1. 预检查接入 `/submit/preflight/` 和受 CSRF 保护的检查接口；照片预检查也按 20 张/32MB 分批，避免大请求触发 Nginx 413。
 2. 管理员采集统计及异常名单 XLSX 接入独立权限保护，统计只取当前有效采用版本。
 3. 导出目录加入学年层级：`学年/学部/年级/班级/就读类型`，防止不同学年同名班级覆盖。
-4. 清空全部资料改为先备份、媒体隔离、数据库提交后删除，并清理上传会话、批次、暂存文件和补传记录。
-5. 恢复逻辑保留 Docker 媒体挂载点，不删除挂载目录本身。
+4. 清空/备份/恢复统一使用跨 Worker 文件锁；普通上传、补传、人工匹配、审核写操作均受共享写门禁保护，清空成功后状态文件保持 `closed`，只允许管理员明确重开。
+5. 清空备份使用 UUID 后缀且目标存在时拒绝覆盖；失败时使用已校验快照恢复 SQLite 与媒体。
+6. Nginx 将 `X-Forwarded-For` 覆盖为 `$remote_addr`；预检查单独使用 120/60 秒有界配额，300 张大照片不与普通提交配额冲突。
+7. 预检查页“继续提交”已接通，并明确提示浏览器不会跨页面保留文件。
+
+## 本轮门禁
+
+| 门禁 | 结果 |
+|---|---|
+| E-F1 密码二次验证 | PASS：错误/缺失零修改，正确密码可清空，管理员保留 |
+| E-F2 维护冻结/备份/清空/恢复 | PASS：跨线程排空、唯一备份、失败回滚、成功闭锁 |
+| E-F3 可信代理/限流 | PASS：Nginx XFF 覆盖；伪造 XFF 仍在第 21 次返回 429 |
+| E-F4 300×3MB 预检查/上传 | PASS：300 张预检查、34 批正式上传、SHA256/ZIP/Excel 对账 |
+| E-F5 继续提交操作 | PASS：桌面/390×844 手机实测跳转并提示重选 |
+
+说明：截图与浏览器日志仅保存在本次隔离工作树的 `output/playwright/`，未作为生产资料或公共静态文件发布。
 
 ## 门禁
 
