@@ -90,10 +90,16 @@ def test_ten_classes_submit_twenty_photos_each_without_cross_class_data():
     barrier = threading.Barrier(10)
 
     def submit_class(index):
+        from django.db import close_old_connections
+
         rows = [[f"并发R2-{index:02d}-{n:02d}", "男" if n % 2 else "女", "高中部", "2026", str(index), "住宿", ""] for n in range(20)]
         photos = [photo_file(f"并发R2-{index:02d}-{n:02d}.jpg", (index * 11 % 255, n * 7 % 255, 70)) for n in range(20)]
-        barrier.wait(timeout=10)
-        return complete_submission(rows, photos)
+        close_old_connections()
+        try:
+            barrier.wait(timeout=10)
+            return complete_submission(rows, photos)
+        finally:
+            close_old_connections()
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         submissions = list(pool.map(submit_class, range(10)))
