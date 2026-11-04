@@ -1,6 +1,38 @@
 {% extends 'collector/base.html' %}
+{% load static %}
 {% block title %}提交成功 · {{ site_name }}{% endblock %}
 {% block content %}
-<main class="narrow-page"><div class="success-mark">✓</div><div class="eyebrow">提交已生成独立版本</div><h1>资料已收到。</h1><p class="lede">请保存下面的提交编号和修改凭证。凭证只允许查看本次提交版本，离开页面后不会再次显示。</p><div class="metric-grid receipt-metrics"><div class="metric"><span>学生记录</span><strong>{{ submission.students.count }}</strong></div><div class="metric accent"><span>已匹配照片</span><strong>{{ matched_count }}</strong></div><div class="metric warn"><span>待处理</span><strong>{{ missing_count }}</strong></div></div><div class="receipt"><div><span>提交编号</span><strong>{{ submission.id }}</strong></div><div><span>修改凭证</span><code>{{ token }}</code></div></div><div class="warning-box">修改凭证相当于本次提交的访问钥匙，请勿转发给无关人员。</div><a class="button primary" href="{{ result_url }}?token={{ token }}">查看匹配结果 →</a><a class="back-link" href="{% url 'submit' %}">继续提交另一个版本</a></main>
+<main class="narrow-page">
+  <div class="success-mark" aria-hidden="true">✓</div>
+  <div class="eyebrow">提交已生成独立版本</div>
+  <h1>资料已收到。</h1>
+  <p class="lede">请保存下面的提交编号和修改凭证。凭证只允许查看本次提交版本，离开页面后不会再次显示。</p>
+
+  <div class="metric-grid receipt-metrics">
+    <div class="metric"><span>学生记录</span><strong>{{ submission.students.count }}</strong></div>
+    <div class="metric accent"><span>已匹配照片</span><strong>{{ matched_count }}</strong></div>
+    <div class="metric warn"><span>待处理</span><strong>{{ missing_count }}</strong></div>
+  </div>
+
+  <section class="receipt" aria-label="本次提交凭证">
+    <div class="receipt-row">
+      <span>提交编号</span>
+      <div class="receipt-value"><strong id="submission-id">{{ submission.id }}</strong><button type="button" class="copy-button" data-copy-target="submission-id" data-copy-label="复制提交编号">复制提交编号</button></div>
+    </div>
+    <div class="receipt-row">
+      <span>修改凭证</span>
+      <div class="receipt-value"><code id="submission-token">{{ token }}</code><button type="button" class="copy-button" data-copy-target="submission-token" data-copy-label="复制修改凭证">复制修改凭证</button></div>
+    </div>
+    <div class="receipt-row">
+      <span>结果链接</span>
+      <div class="receipt-value"><code id="result-link">{{ result_url }}?token={{ token }}</code><button type="button" class="copy-button" data-copy-target="result-link" data-copy-label="复制结果链接">复制结果链接</button></div>
+    </div>
+    <div class="copy-feedback" data-copy-feedback role="status" aria-live="polite"></div>
+  </section>
+
+  <div class="warning-box"><strong>请保存修改凭证</strong><br>凭证相当于本次提交的访问钥匙，请勿转发给无关人员。建议同时保存结果链接，后续可凭它查看匹配结果。</div>
+  <div class="success-actions"><a class="button primary" href="{{ result_url }}?token={{ token }}">查看匹配结果 →</a><a class="back-link" href="{% url 'submit' %}">继续提交另一个版本</a></div>
+</main>
 {% endblock %}
+{% block scripts %}<script src="{% static 'js/clipboard.js' %}" defer></script>{% endblock %}
 
