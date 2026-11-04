@@ -97,13 +97,13 @@ def test_all_export_splits_study_types_and_includes_original_roster(settings, tm
     payload, count, _ = export_students({"school_year__name": "2026", "department": "high"})
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
-        assert "高中部/高一/1/走读/学生统计表.xlsx" in names
-        assert "高中部/高一/1/半走读/学生统计表.xlsx" in names
-        assert "高中部/高一/1/住宿/学生统计表.xlsx" in names
-        assert "高中部/高一/1/走读/学生照片/走读生.jpg" in names
-        assert "高中部/高一/1/半走读/学生照片/半走读生.jpg" in names
-        assert "高中部/高一/1/住宿/学生照片/住宿生.jpg" in names
-        assert "高中部/高一/1/学生名单/名单.xlsx" in names
+        assert "2026/高中部/高一/1/走读/学生统计表.xlsx" in names
+        assert "2026/高中部/高一/1/半走读/学生统计表.xlsx" in names
+        assert "2026/高中部/高一/1/住宿/学生统计表.xlsx" in names
+        assert "2026/高中部/高一/1/走读/学生照片/走读生.jpg" in names
+        assert "2026/高中部/高一/1/半走读/学生照片/半走读生.jpg" in names
+        assert "2026/高中部/高一/1/住宿/学生照片/住宿生.jpg" in names
+        assert "2026/高中部/高一/1/学生名单/名单.xlsx" in names
     assert count == 3
 
 

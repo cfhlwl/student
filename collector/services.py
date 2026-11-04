@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 import zipfile
+from functools import wraps
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
@@ -26,6 +27,7 @@ from openpyxl.utils import get_column_letter
 from PIL import Image, UnidentifiedImageError
 
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
+from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
@@ -72,6 +74,18 @@ class ValidationError(Exception):
     def __init__(self, message, errors=None):
         super().__init__(message)
         self.errors = errors or []
+
+
+def collection_write_required(function):
+    """Make a service mutation wait for, or reject during, maintenance."""
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        try:
+            with collection_write_gate():
+                return function(*args, **kwargs)
+        except MaintenanceError as exc:
+            raise ValidationError(str(exc)) from exc
+    return guarded
 
 
 def safe_filename(value, fallback="未命名"):
@@ -584,6 +598,7 @@ def _create_submission_records(*, records, roster_name, roster_candidate, photo_
         raise
 
 
+@collection_write_required
 def create_submission(*, roster_upload, photo_uploads, document_uploads, note="", ip_address=None):
     records = parse_roster(roster_upload)
     if len(photo_uploads) > settings.MAX_PHOTOS_PER_SUBMISSION:
@@ -622,6 +637,7 @@ def _check_upload_token(session, token):
         raise ValidationError("上传凭证无效")
 
 
+@collection_write_required
 def start_upload_session(*, roster_upload, document_uploads, expected_photo_count=0, expected_document_count=None, photo_manifest=None, document_manifest=None, roster_fingerprint="", note="", ip_address=None, idempotency_key=""):
     if expected_photo_count < 0 or expected_photo_count > settings.MAX_PHOTOS_PER_SUBMISSION:
         raise ValidationError(f"照片数量不能超过 {settings.MAX_PHOTOS_PER_SUBMISSION} 张")
@@ -722,6 +738,7 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         raise
 
 
+@collection_write_required
 def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manifest_digest=None, roster_fingerprint=None, trusted_internal=False, already_prepared=False):
     if kind not in {"photo", "document"}:
         raise ValidationError("上传批次类型不正确")
@@ -882,6 +899,7 @@ def _check_submission_token(submission, token):
         raise ValidationError("访问凭证无效")
 
 
+@collection_write_required
 def create_photo_supplement(*, submission_id, token, photo_uploads, note="", ip_address=None):
     submission = _with_db_retry(lambda: Submission.objects.prefetch_related("students").get(pk=submission_id))
     _check_submission_token(submission, token)
@@ -937,6 +955,7 @@ def create_photo_supplement(*, submission_id, token, photo_uploads, note="", ip_
         raise
 
 
+@collection_write_required
 def match_supplement_photo(*, photo_id, student_id=None, actor=None, ip_address=None):
     """Bind, change, or clear one pending supplement photo without changing its file."""
     def operation():
@@ -976,6 +995,7 @@ def match_supplement_photo(*, photo_id, student_id=None, actor=None, ip_address=
     return _with_db_retry(operation)
 
 
+@collection_write_required
 def review_photo_supplement(*, supplement_id, action, actor, ip_address=None):
     if action not in {"approved", "rejected"}:
         raise ValidationError("补传审核操作不正确")
@@ -1039,6 +1059,7 @@ def _mark_upload_session_completed(session_id, submission):
         locked.save(update_fields=["status", "completed_submission", "updated_at"])
 
 
+@collection_write_required
 def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_fingerprint=None, ip_address=None):
     session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
     _check_upload_token(session, token)
@@ -1135,6 +1156,7 @@ def validate_naming_rule(rule):
     return rule
 
 
+@collection_write_required
 def review_submission_version(*, submission_id, action, actor, ip_address=None):
     if action not in {"approved", "rejected"}:
         raise ValidationError("审核操作不正确")
@@ -1260,7 +1282,9 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     if filters.get("has_photo") == "no": students = [s for s in students if not (s.match_status == "matched" and hasattr(s, "photo"))]
     rule = validate_naming_rule(NamingRule.current())
     groups = defaultdict(list)
-    for student in students: groups[(student.department, student.grade, student.class_name)].append(student)
+    # 学年是导出范围的一部分；同名班级在不同学年必须落入不同目录。
+    for student in students:
+        groups[(student.school_year.name, student.department, student.grade, student.class_name)].append(student)
     Path(settings.EXPORT_TEMP_DIR).mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix="student-export-", suffix=".zip", dir=settings.EXPORT_TEMP_DIR)
     os.close(fd)
@@ -1270,8 +1294,8 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     try:
         with zipfile.ZipFile(temp_name, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
             for group_key, group_students in groups.items():
-                dept, grade, class_name = group_key
-                class_dir = "/".join(safe_filename(v) for v in [_department_code(dept), grade, class_name])
+                school_year, dept, grade, class_name = group_key
+                class_dir = "/".join(safe_filename(v) for v in [school_year, _department_code(dept), grade, class_name])
                 class_submissions = list(Submission.objects.filter(students__in=group_students).distinct())
                 class_file_anomalies = []
                 roster_names = set()
@@ -1388,6 +1412,7 @@ def clear_rejected_submissions(actor=None, ip_address=None):
     return len(submissions), removed_students, removed_files
 
 
+@collection_write_required
 @transaction.atomic
 def clear_expired_upload_sessions(days, actor=None, ip_address=None):
     cutoff = timezone.now() - timedelta(days=days)
@@ -1407,6 +1432,7 @@ def clear_expired_upload_sessions(days, actor=None, ip_address=None):
     return len(sessions), removed_files
 
 
+@collection_maintenance_required
 @transaction.atomic
 def clear_all_collection_data():
     """Reset collection data while preserving administrator accounts."""

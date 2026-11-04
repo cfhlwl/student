@@ -256,7 +256,9 @@ class NamingRule(models.Model):
     @classmethod
     def current(cls):
         obj = cls.objects.first()
-        return obj or cls.objects.create()
+        # Read paths must not create a row. The admin write path creates and
+        # saves an explicit default object when the naming rule is first set.
+        return obj or cls()
 
 
 class AppSetting(models.Model):

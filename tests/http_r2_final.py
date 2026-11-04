@@ -107,7 +107,7 @@ def document_bytes():
 def split_batches(items):
     result, current, current_size = [], [], 0
     for item in items:
-        if current and current_size + len(item[1]) > MAX_BATCH_BYTES:
+        if current and (len(current) >= 20 or current_size + len(item[1]) > MAX_BATCH_BYTES):
             result.append(current)
             current, current_size = [], 0
         current.append(item)

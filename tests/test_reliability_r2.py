@@ -265,7 +265,7 @@ def test_blank_gender_does_not_use_female_code():
     try:
         with zipfile.ZipFile(temp_path) as archive:
             names = [name for name in archive.namelist() if name.endswith(".jpg")]
-            assert names == ["高中部/高一/1/走读/学生照片/性别为空.jpg"]
+            assert names == ["2026/高中部/高一/1/走读/学生照片/性别为空.jpg"]
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -304,7 +304,7 @@ def test_same_current_school_year_keeps_all_six_grades_and_export_paths(settings
             names = set(archive.namelist())
             assert count == 6
             for grade, department in grade_rows:
-                assert any(name.startswith(f"{department}/{grade}/") and name.endswith(".jpg") for name in names)
+                assert any(name.startswith(f"2026/{department}/{grade}/") and name.endswith(".jpg") for name in names)
     finally:
         temp_path.unlink(missing_ok=True)
 

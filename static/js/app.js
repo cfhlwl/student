@@ -81,6 +81,30 @@ document.addEventListener('DOMContentLoaded', function () {
       for (const file of files) manifest.push({name: file.name, size: file.size, sha256: await fileFingerprint(file)});
       return manifest;
     }
+    async function runPreflight(roster, photos, csrf) {
+      const endpoint = submitForm.dataset.preflightEndpoint;
+      if (!endpoint) return;
+      if (photos.length > 300 || photos.reduce(function (total, file) { return total + file.size; }, 0) > 300 * 20 * 1024 * 1024) throw new Error('上传前预检查未通过：照片数量或总大小超过限制');
+      const batches = [], maxCount = 20, maxBytes = 32 * 1024 * 1024;
+      for (let index = 0; index < photos.length;) {
+        let end = index, size = 0;
+        while (end < photos.length && end < index + maxCount && (end === index || size + photos[end].size + roster.size <= maxBytes)) { size += photos[end].size; end += 1; }
+        if (end === index) throw new Error('单张照片与 Excel 合计超过单批上传限制');
+        batches.push(photos.slice(index, end)); index = end;
+      }
+      if (!batches.length) batches.push([]);
+      const errors = [], warnings = [];
+      for (const batch of batches) {
+        const body = new FormData(); body.append('roster', roster, roster.name); batch.forEach(function (file) { body.append('photos', file, file.name); });
+        const response = await fetch(endpoint, {method: 'POST', body: body, credentials: 'same-origin', cache: 'no-store', headers: {'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest'}});
+        let payload = {};
+        try { payload = await response.json(); } catch (error) { throw new Error('上传前预检查返回无效结果，请重试'); }
+        if (!response.ok) throw new Error(payload.error || '上传前预检查失败，请重试');
+        errors.push.apply(errors, payload.blocking_errors || []); warnings.push.apply(warnings, payload.warnings || []);
+      }
+      if (errors.length) throw new Error('上传前预检查未通过：' + errors.slice(0, 6).map(function (item) { return item.message; }).join('；'));
+      if (warnings.length && !window.confirm('上传前预检查发现 ' + warnings.length + ' 项提醒：\n\n' + warnings.slice(0, 6).map(function (item) { return item.message; }).join('\n') + '\n\n确认已核对并继续提交吗？')) throw new Error('已取消提交，请根据预检查提醒调整文件后重试');
+    }
     function persist(state) { window.__studentUploadState = state; sessionStorage.setItem(storageKey, JSON.stringify(state)); }
     function clearPersisted() { window.__studentUploadState = null; sessionStorage.removeItem(storageKey); }
     function urlFor(template, id) { return template.replace(placeholder, id); }
@@ -117,6 +141,7 @@ document.addEventListener('DOMContentLoaded', function () {
       const files = Array.from(photoInput?.files || []), documents = Array.from(documentInput?.files || []);
       if (!rosterInput?.files[0]) throw new Error('请先选择 Excel 名单');
       const photoManifest = await buildPhotoManifest(files), documentManifest = await buildDocumentManifest(documents), rosterFingerprint = await fileFingerprint(rosterInput.files[0]);
+      await runPreflight(rosterInput.files[0], files, csrf);
       const inputKey = JSON.stringify({rosterFingerprint: rosterFingerprint, photoManifest: photoManifest, documentManifest: documentManifest});
       let state = window.__studentUploadState;
       try { if (!state) state = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); } catch (error) { state = null; }

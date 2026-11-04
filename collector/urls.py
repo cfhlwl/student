@@ -1,12 +1,14 @@
 from django.urls import path
 
 from .views import (
-    StaffLoginView, StaffLogoutView, admin_classes, admin_dashboard, admin_naming, admin_students,
-    admin_submissions, clear_test_data, download_template, export_zip, manual_match, manual_supplement_match, protected_document, protected_photo, public_submit, review_submission, review_supplement, submit_result, submit_supplement, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start, upload_status,
+    StaffLoginView, StaffLogoutView, admin_classes, admin_dashboard, admin_naming, admin_statistics, admin_statistics_exceptions, admin_students,
+    admin_submissions, clear_test_data, download_template, export_zip, manual_match, manual_supplement_match, protected_document, protected_photo, public_submit, review_submission, review_supplement, submit_preflight, submit_preflight_page, submit_result, submit_supplement, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start, upload_status,
 )
 
 urlpatterns = [
     path("submit", public_submit, name="submit"),
+    path("submit/preflight/", submit_preflight_page, name="submit-preflight-page"),
+    path("submit/preflight/check/", submit_preflight, name="submit-preflight"),
     path("submit/upload/start/", upload_start, name="upload-start"),
     path("submit/upload/<uuid:session_id>/photos/", upload_photo_batch, name="upload-photo-batch"),
     path("submit/upload/<uuid:session_id>/documents/", upload_document_batch, name="upload-document-batch"),
@@ -18,6 +20,8 @@ urlpatterns = [
     path("admin/login/", StaffLoginView.as_view(), name="admin-login"),
     path("admin/logout/", StaffLogoutView.as_view(), name="admin-logout"),
     path("admin/", admin_dashboard, name="admin-dashboard"),
+    path("admin/statistics/", admin_statistics, name="admin-statistics"),
+    path("admin/statistics/exceptions.xlsx", admin_statistics_exceptions, name="admin-statistics-exceptions"),
     path("admin/submissions/", admin_submissions, name="admin-submissions"),
     path("admin/submissions/<uuid:submission_id>/review/", review_submission, name="review-submission"),
     path("admin/supplements/<uuid:supplement_id>/review/", review_supplement, name="review-supplement"),
