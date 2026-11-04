@@ -7,8 +7,10 @@ import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
@@ -86,7 +88,8 @@ def test_frontend_batches_when_total_size_exceeds_limit():
     assert "files.reduce" in source or "file.size" in source and "batchBytes" in source
 
 
-def test_ten_classes_submit_twenty_photos_each_without_cross_class_data():
+def test_ten_classes_submit_twenty_photos_each_without_cross_class_data(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
     barrier = threading.Barrier(10)
 
     def submit_class(index):
@@ -108,7 +111,10 @@ def test_ten_classes_submit_twenty_photos_each_without_cross_class_data():
         students = list(submission.students.order_by("name"))
         assert len(students) == 20
         assert {student.class_name for student in students} == {str(index)}
-        assert submission.photos.count() == 20
+        photos = list(submission.photos.all())
+        assert len(photos) == 20
+        assert all(photo.file.storage.exists(photo.file.name) for photo in photos)
+    assert len([path for path in Path(settings.MEDIA_ROOT).rglob("*") if path.is_file()]) == 10 * (1 + 20)
 
 
 def test_upload_session_rejects_changed_photo_manifest():
