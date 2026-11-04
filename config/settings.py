@@ -19,6 +19,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "collector.middleware.TrustedProxyMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -26,6 +27,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "collector.middleware.CollectionRateLimitMiddleware",
     "collector.middleware.UploadGateMiddleware",
 ]
 
@@ -89,6 +91,14 @@ X_FRAME_OPTIONS = "DENY"
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
 HTTPS_ENABLED = os.getenv("HTTPS_ENABLED", "1") == "1"
+TRUSTED_PROXY_NETWORKS = tuple(filter(None, (value.strip() for value in os.getenv("TRUSTED_PROXY_NETWORKS", "127.0.0.1/32,::1/128").split(","))))
+SECURITY_RATE_LIMIT_CACHE_DIR = Path(os.getenv("SECURITY_RATE_LIMIT_CACHE_DIR", BASE_DIR / "data" / "rate-limit-cache")).resolve()
+SECURITY_RATE_LIMIT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+CACHES = {
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "student-collector-default"},
+    "security_rate": {"BACKEND": "django.core.cache.backends.filebased.FileBasedCache", "LOCATION": str(SECURITY_RATE_LIMIT_CACHE_DIR), "TIMEOUT": 120, "OPTIONS": {"MAX_ENTRIES": 10000}},
+}
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = HTTPS_ENABLED
 CSRF_COOKIE_SECURE = HTTPS_ENABLED
 SECURE_HSTS_SECONDS = 31536000 if HTTPS_ENABLED else 0
