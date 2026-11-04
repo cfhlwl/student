@@ -14,6 +14,12 @@
     <div class="summary-alert"><span>待人工确认</span><strong data-summary="ambiguous">—</strong></div>
   </section>
 
+  {% if photo_collection_complete %}
+  <section class="panel supplement-panel result-complete-panel">
+    <div class="panel-heading"><div><span class="kicker">资料已齐全</span><h2>提交成功！</h2></div><span class="status status-matched">照片已全部匹配</span></div>
+    <p>名单中的学生照片均已成功匹配，无需补传。</p>
+  </section>
+  {% else %}
   <section class="panel supplement-panel">
     <div class="panel-heading"><div><span class="kicker">补传入口</span><h2>补传缺失照片</h2></div><span class="status status-pending">需管理员审核</span></div>
     <p>仅可补传本次提交版本中缺失或待确认的照片；补传后需管理员审核，不会静默覆盖已采用照片。</p>
@@ -22,6 +28,7 @@
     </form>
     {% for supplement in supplements %}<div class="supplement-row"><strong>{{ supplement.created_at|date:'Y-m-d H:i' }} 补传</strong><span class="status status-{{ supplement.status }}">{{ supplement.get_status_display }}</span><span>{{ supplement.photos.count }} 张照片</span></div>{% empty %}<p class="empty supplement-empty">还没有补传记录。</p>{% endfor %}
   </section>
+  {% endif %}
 
   <section class="result-list-panel">
     <div class="result-toolbar"><div><span class="kicker">逐项核对</span><h2>学生资料</h2></div><div class="result-filters" role="group" aria-label="按匹配状态筛选"><button type="button" class="filter-chip is-active" data-result-filter="all" aria-pressed="true">全部</button><button type="button" class="filter-chip" data-result-filter="matched" aria-pressed="false">已匹配</button><button type="button" class="filter-chip" data-result-filter="missing" aria-pressed="false">缺少照片</button><button type="button" class="filter-chip" data-result-filter="ambiguous" aria-pressed="false">待人工确认</button></div></div>
