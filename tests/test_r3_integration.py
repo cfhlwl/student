@@ -77,7 +77,7 @@ def test_admin_clear_button_requires_confirmation_and_preserves_admin(client, se
     denied = client.post(reverse("clear-test-data"))
     assert denied.status_code == 302
     assert Submission.objects.exists()
-    cleared = client.post(reverse("clear-test-data"), {"confirm_clear": "YES"})
+    cleared = client.post(reverse("clear-test-data"), {"confirm_clear": "YES", "admin_password": "strong-password-123"})
     assert cleared.status_code == 302
     assert not Submission.objects.exists()
     assert User.objects.filter(pk=admin.pk).exists()

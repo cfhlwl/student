@@ -1,5 +1,6 @@
 import hashlib
 import json
+import uuid
 from datetime import timedelta
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .backup import BackupError, clear_collection_safely
+from .maintenance import MaintenanceError, collection_write_gate, read_state, write_state
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
 from .preflight import run_preflight
@@ -63,7 +65,7 @@ def public_submit(request):
                 return render(request, "collector/submit_success.html", {"submission": submission, "token": token, "matched_count": submission.students.filter(match_status="matched").count(), "missing_count": submission.students.exclude(match_status="matched").count(), "result_url": result_url})
     else:
         form = SubmissionForm()
-    return render(request, "collector/submit.html", {"form": form})
+    return render(request, "collector/submit.html", {"form": form, "show_reselect_notice": request.GET.get("from") == "preflight"})
 
 
 @require_GET
@@ -370,10 +372,15 @@ def manual_match(request, photo_id):
     if StudentPhoto.objects.filter(student=student).exists():
         messages.error(request, "该学生已有照片，不能覆盖原照片。")
     else:
-        photo.student = student; photo.save(update_fields=["student"])
-        student.match_status = "matched"; student.save(update_fields=["match_status"])
-        AuditLog.objects.create(actor=request.user, action="manual_photo_match", target_type="Student", target_id=str(student.id), detail={"photo_id": photo.id}, ip_address=client_ip(request))
-        messages.success(request, f"已将 {photo.original_name} 绑定到 {student.name}。")
+        try:
+            with collection_write_gate():
+                photo.student = student; photo.save(update_fields=["student"])
+                student.match_status = "matched"; student.save(update_fields=["match_status"])
+                AuditLog.objects.create(actor=request.user, action="manual_photo_match", target_type="Student", target_id=str(student.id), detail={"photo_id": photo.id}, ip_address=client_ip(request))
+        except MaintenanceError as exc:
+            messages.error(request, str(exc))
+        else:
+            messages.success(request, f"已将 {photo.original_name} 绑定到 {student.name}。")
     return redirect("admin-students")
 
 
@@ -440,7 +447,12 @@ def admin_naming(request):
 @staff_required
 def toggle_upload(request):
     current = AppSetting.get_bool("public_upload_open", True)
-    AppSetting.set_value("public_upload_open", not current)
+    opening = not current
+    if opening:
+        # Re-opening after a successful clear is an explicit administrator
+        # action; ordinary public-upload toggles do not alter this marker.
+        write_state("open")
+    AppSetting.set_value("public_upload_open", opening)
     AuditLog.objects.create(actor=request.user, action="toggle_public_upload", detail={"open": not current}, ip_address=client_ip(request))
     messages.success(request, "公开上传已" + ("开启" if not current else "关闭") + "。")
     return redirect("admin-dashboard")
@@ -452,14 +464,18 @@ def clear_test_data(request):
     if request.POST.get("confirm_clear") != "YES":
         messages.error(request, "清空操作未确认，未删除任何资料。")
         return redirect("admin-dashboard")
+    admin_password = request.POST.get("admin_password", "")
+    if not admin_password or not request.user.check_password(admin_password):
+        messages.error(request, "管理员密码校验失败，未删除任何资料。")
+        return redirect("admin-dashboard")
     backup_dir = Path(getattr(settings, "COLLECTION_BACKUP_DIR", settings.BASE_DIR / "data" / "backups"))
-    backup_path = backup_dir / f"before-clear-{timezone.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    backup_path = backup_dir / f"before-clear-{timezone.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:10]}.zip"
     try:
         counts = clear_collection_safely(backup_path)
     except (BackupError, OSError) as exc:
         messages.error(request, f"清空未完成，资料未删除；备份或一致性检查失败：{exc}")
         return redirect("admin-dashboard")
-    messages.success(request, f"已先备份并初始化数据库：清除提交 {counts['submissions']} 个、学生 {counts['students']} 条、照片 {counts['photos']} 张、文档 {counts['documents']} 个、学生名单 {counts['rosters']} 个；管理员账号已保留。备份：{backup_path.name}")
+    messages.success(request, f"已先备份并初始化数据库：清除提交 {counts['submissions']} 个、学生 {counts['students']} 条、照片 {counts['photos']} 张、文档 {counts['documents']} 个、学生名单 {counts['rosters']} 个；管理员账号已保留。采集入口已关闭，请明确点击“开启公开上传”后再开始下一轮采集。备份：{backup_path.name}")
     return redirect("admin-dashboard")
 
 

@@ -17,6 +17,7 @@ from django.conf import settings
 from django.db import transaction
 
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, UploadSession
+from .maintenance import collection_maintenance_gate, write_state
 
 
 BACKUP_FORMAT = "student-collector-backup-v2"
@@ -93,12 +94,21 @@ def _manifest(database: Path, media_root: Path, created_at: str) -> dict:
     return {"format": BACKUP_FORMAT, "created_at": created_at, "database": {"path": "db.sqlite3", "size": database.stat().st_size, "sha256": sha256_file(database)}, "media": files}
 
 
-def create_backup(output: str | Path, *, database_path: str | Path | None = None, media_root: str | Path | None = None) -> Path:
+def create_backup(output: str | Path, *, database_path: str | Path | None = None, media_root: str | Path | None = None, assume_maintenance_lock: bool = False) -> Path:
+    if assume_maintenance_lock:
+        return _create_backup_unlocked(output, database_path=database_path, media_root=media_root)
+    with collection_maintenance_gate():
+        return _create_backup_unlocked(output, database_path=database_path, media_root=media_root)
+
+
+def _create_backup_unlocked(output: str | Path, *, database_path: str | Path | None = None, media_root: str | Path | None = None) -> Path:
     database_name = str(database_path or settings.DATABASES["default"]["NAME"])
     database = Path(database_name).resolve() if not database_name.startswith("file:") else None
     media = Path(media_root or settings.MEDIA_ROOT).resolve()
     destination = Path(output).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise BackupError(f"备份文件已存在，拒绝覆盖：{destination.name}")
     if database is not None and not database.exists():
         raise BackupError(f"数据库不存在：{database}")
     staging = Path(tempfile.mkdtemp(prefix="collection-backup-", dir=destination.parent))
@@ -118,7 +128,11 @@ def create_backup(output: str | Path, *, database_path: str | Path | None = None
                 archive.write(path, f"media/{relative}")
             archive.write(staging / "MANIFEST.json", "MANIFEST.json")
         verify_backup(partial)
-        os.replace(partial, destination)
+        try:
+            os.link(partial, destination)
+        except FileExistsError as exc:
+            raise BackupError(f"备份文件已存在，拒绝覆盖：{destination.name}") from exc
+        partial.unlink(missing_ok=True)
         return destination
     except Exception as exc:
         partial.unlink(missing_ok=True)
@@ -167,6 +181,11 @@ def verify_backup(archive_path: str | Path) -> dict:
 
 
 def restore_backup(archive_path: str | Path, *, database_path: str | Path | None = None, media_root: str | Path | None = None) -> dict:
+    with collection_maintenance_gate():
+        return _restore_backup_unlocked(archive_path, database_path=database_path, media_root=media_root)
+
+
+def _restore_backup_unlocked(archive_path: str | Path, *, database_path: str | Path | None = None, media_root: str | Path | None = None) -> dict:
     database = Path(database_path or settings.DATABASES["default"]["NAME"]).resolve()
     media = Path(media_root or settings.MEDIA_ROOT).resolve()
     staging = Path(tempfile.mkdtemp(prefix="restore-backup-", dir=Path(archive_path).resolve().parent))
@@ -208,48 +227,63 @@ def restore_backup(archive_path: str | Path, *, database_path: str | Path | None
 
 
 def clear_collection_safely(backup_path: str | Path, *, database_path: str | Path | None = None, media_root: str | Path | None = None) -> dict:
-    """Backup first; quarantine media before DB commit; delete after commit."""
+    """Freeze all collection writes, back up, then clear without reopening."""
     database_name = str(database_path or settings.DATABASES["default"]["NAME"])
     database = Path(database_name).resolve() if not database_name.startswith("file:") else None
     media = Path(media_root or settings.MEDIA_ROOT).resolve()
-    create_backup(backup_path, database_path=database, media_root=media)
-    previous_gate = AppSetting.get_value("public_upload_open", "__missing__")
-    AppSetting.set_value("public_upload_open", "false")
-    quarantine = media / f".clear-quarantine-{uuid.uuid4().hex}"
-    moved = []
-    try:
-        quarantine.mkdir(parents=True, exist_ok=False)
-        for name in COLLECTION_MEDIA_DIRS:
-            root = media / name
-            if root.exists():
-                target = quarantine / name
-                shutil.move(str(root), str(target))
-                moved.append((root, target))
-        with transaction.atomic():
-            counts = {"submissions": Submission.objects.count(), "students": Student.objects.count(), "photos": StudentPhoto.objects.count(), "documents": SubmissionDocument.objects.count(), "rosters": sum(bool(row.roster_file) for row in Submission.objects.all()), "staged_uploads": StagedUpload.objects.count(), "upload_sessions": UploadSession.objects.count(), "supplements": PhotoSupplement.objects.count()}
-            Submission.objects.all().delete()
-            Student.objects.all().delete()
-            PhotoSupplement.objects.all().delete()
-            UploadSession.objects.all().delete()
-            StagedUpload.objects.all().delete()
-            ClassGroup.objects.all().delete()
-            SchoolYear.objects.all().delete()
-            NamingRule.objects.all().delete()
-            AppSetting.objects.all().delete()
-            AuditLog.objects.all().delete()
-        for name in COLLECTION_MEDIA_DIRS:
-            (media / name).mkdir(parents=True, exist_ok=True)
-        shutil.rmtree(quarantine, ignore_errors=True)
-        return counts
-    except Exception:
-        if previous_gate == "__missing__":
-            AppSetting.objects.filter(key="public_upload_open").delete()
-        else:
-            AppSetting.set_value("public_upload_open", previous_gate)
-        for root, target in reversed(moved):
-            if root.exists():
-                shutil.rmtree(root, ignore_errors=True)
-            if target.exists():
-                shutil.move(str(target), str(root))
-        shutil.rmtree(quarantine, ignore_errors=True)
-        raise
+    with collection_maintenance_gate() as previous_state:
+        previous_gate = AppSetting.get_value("public_upload_open", "__missing__")
+        create_backup(backup_path, database_path=database, media_root=media, assume_maintenance_lock=True)
+        backup_created = True
+        AppSetting.set_value("public_upload_open", "false")
+        quarantine = media / f".clear-quarantine-{uuid.uuid4().hex}"
+        moved = []
+        try:
+            quarantine.mkdir(parents=True, exist_ok=False)
+            for name in COLLECTION_MEDIA_DIRS:
+                root = media / name
+                if root.exists():
+                    target = quarantine / name
+                    shutil.move(str(root), str(target))
+                    moved.append((root, target))
+            with transaction.atomic():
+                counts = {"submissions": Submission.objects.count(), "students": Student.objects.count(), "photos": StudentPhoto.objects.count(), "documents": SubmissionDocument.objects.count(), "rosters": sum(bool(row.roster_file) for row in Submission.objects.all()), "staged_uploads": StagedUpload.objects.count(), "upload_sessions": UploadSession.objects.count(), "supplements": PhotoSupplement.objects.count()}
+                Submission.objects.all().delete()
+                Student.objects.all().delete()
+                PhotoSupplement.objects.all().delete()
+                UploadSession.objects.all().delete()
+                StagedUpload.objects.all().delete()
+                ClassGroup.objects.all().delete()
+                SchoolYear.objects.all().delete()
+                NamingRule.objects.all().delete()
+                AppSetting.objects.all().delete()
+                AuditLog.objects.all().delete()
+            for name in COLLECTION_MEDIA_DIRS:
+                (media / name).mkdir(parents=True, exist_ok=True)
+            write_state("closed")
+            shutil.rmtree(quarantine, ignore_errors=True)
+            return counts
+        except Exception:
+            restored_from_backup = False
+            if locals().get("backup_created"):
+                try:
+                    # If a post-transaction filesystem operation fails, the
+                    # already-verified snapshot restores both SQLite and all
+                    # media instead of leaving a half-cleared collection.
+                    restore_backup(backup_path, database_path=database, media_root=media)
+                    restored_from_backup = True
+                except Exception:
+                    restored_from_backup = False
+            if not restored_from_backup:
+                if previous_gate == "__missing__":
+                    AppSetting.objects.filter(key="public_upload_open").delete()
+                else:
+                    AppSetting.set_value("public_upload_open", previous_gate)
+                for root, target in reversed(moved):
+                    if root.exists():
+                        shutil.rmtree(root, ignore_errors=True)
+                    if target.exists():
+                        shutil.move(str(target), str(root))
+            write_state(previous_state)
+            shutil.rmtree(quarantine, ignore_errors=True)
+            raise

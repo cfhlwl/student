@@ -4,7 +4,7 @@
 {% block topbar_right %}{% endblock %}
 {% block content %}
 <main class="public-page" aria-label="上传前资料预检查">
-  <section class="submit-card preflight-card" id="preflight-app" data-preflight-endpoint="{{ preflight_endpoint|default:'' }}">
+  <section class="submit-card preflight-card" id="preflight-app" data-preflight-endpoint="{{ preflight_endpoint|default:'' }}" data-submit-url="{% url 'submit' %}">
     <div class="card-heading">
       <div><span class="kicker">提交前检查</span><h1>核对名单和照片</h1></div>
       <span class="field-help">预检查不会创建上传会话，最终提交仍由服务器再次校验。</span>
@@ -47,4 +47,4 @@
   </section>
 </main>
 {% endblock %}
-{% block scripts %}<script src="{% static 'js/preflight.js' %}?v=20261104-1"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'js/preflight.js' %}?v=20261104-2"></script>{% endblock %}

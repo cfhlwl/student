@@ -4,6 +4,7 @@
 {% block content %}
 <main class="public-page" aria-label="赤峰一中学生资料采集"><span class="sr-only">赤峰一中学生资料采集</span>
   <section class="process-strip"><div><b>01</b><span>准备名单</span></div><div><b>02</b><span>批量选照片</span></div><div><b>03</b><span>提交并核对</span></div></section>
+  {% if show_reselect_notice %}<div class="warning-box" role="status">已返回提交页面。浏览器不会跨页面保留文件，请重新选择 Excel、照片和相关文档后再提交。</div>{% endif %}
   {% if form.non_field_errors %}<div class="error-box">{% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
   <form method="post" enctype="multipart/form-data" class="submit-card" id="submit-form" data-preflight-endpoint="{% url 'submit-preflight' %}" data-upload-start="{% url 'upload-start' %}" data-upload-batch="{% url 'upload-photo-batch' '00000000-0000-0000-0000-000000000000' %}" data-upload-document-batch="{% url 'upload-document-batch' '00000000-0000-0000-0000-000000000000' %}" data-upload-complete="{% url 'upload-complete' '00000000-0000-0000-0000-000000000000' %}" data-upload-status="{% url 'upload-status' '00000000-0000-0000-0000-000000000000' %}" data-photo-batch-size="20" data-photo-batch-mb="32">
     {% csrf_token %}

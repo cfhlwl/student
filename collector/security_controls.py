@@ -25,6 +25,10 @@ DEFAULT_RATE_LIMITS = {
     "upload_status": RateLimitRule(120, 60),
     "upload_complete": RateLimitRule(20, 60),
     "supplement": RateLimitRule(20, 60),
+    # A 300-photo preflight is split into roughly 30 requests at the 32 MiB
+    # request cap. It remains bounded, but does not collide with the ordinary
+    # page/submit quota shared by a school's NAT address.
+    "preflight": RateLimitRule(120, 60),
 }
 
 
@@ -72,7 +76,7 @@ def classify_rate_limit(path: str, method: str) -> str | None:
     if clean == "/submit":
         return "submit"
     if clean == "/submit/preflight/check":
-        return "submit"
+        return "preflight"
     if clean == "/submit/upload/start":
         return "upload_start"
     if clean.endswith("/photos") and "/submit/upload/" in clean:

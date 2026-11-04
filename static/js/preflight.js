@@ -96,6 +96,10 @@
     root.querySelector('[data-warning-ack]')?.addEventListener('change', function () {
       if (payload) updateContinue(root, payload);
     });
+    root.querySelector('[data-preflight-continue]')?.addEventListener('click', function () {
+      var target = root.dataset.submitUrl || '/submit/';
+      window.location.assign(target + (target.indexOf('?') >= 0 ? '&' : '?') + 'from=preflight');
+    });
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       var roster = form.querySelector('[name="roster"]')?.files?.[0];
