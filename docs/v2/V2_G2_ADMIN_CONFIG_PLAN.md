@@ -5,11 +5,13 @@
 | 页面 | 作用 | 写入对象 | 权限 |
 | --- | --- | --- | --- |
 | 项目管理 | 新建、停用、复制项目；设置公开状态 | `CollectionProject` | owner |
-| 模板设计 | 字段、选项、列顺序、唯一性、匹配和导出规则 | `TemplateVersion` 草稿 | owner/editor |
+| 采集入口 | 创建多个入口、范围说明、同时开放/停用、当前模板版本 | `CollectionEntry` | owner/editor |
+| 采集活动 | 创建周期、范围、开放/暂停/关闭、采用模式 | `CollectionActivity` | owner/editor |
+| 模板设计 | 字段、选项、列顺序、唯一性、匹配和字段导出映射 | `TemplateVersion` 草稿 | owner/editor |
 | 模板发布 | 运行校验、查看差异、发布不可变版本 | `TemplateVersion` | owner |
 | 文件设置 | 扩展名、MIME、大小、数量、配额、保留期 | `ProjectConfigVersion` | owner |
 | 审核流程 | 自动采用条件、人工审核、补传规则 | `ProjectConfigVersion` | owner/editor |
-| 导出规则 | 目录层级、命名字段、统计列、异常工作表 | `ProjectConfigVersion` | owner/editor/exporter |
+| 导出策略 | 目录层级、分类、命名字段、工作表名称、异常表策略 | `ProjectConfigVersion.export_policy_json` | owner/editor/exporter |
 | 品牌设置 | 名称、说明、颜色、Logo、用途告知 | `ProjectConfigVersion` | owner |
 | 成员权限 | 项目成员和角色 | `ProjectMember` | owner |
 | 备份恢复 | 在线备份、验证、隔离恢复、清理 | 备份文件和审计 | owner |
@@ -25,10 +27,19 @@
 2. 服务端校验 Schema、跨字段关系、配额和文件安全规则。
 3. 显示差异、影响范围和生效时间。
 4. 发布生成不可变 `ProjectConfigVersion`，更新项目的当前指针。
-5. 新采集会话锁定当前配置版本；已有会话继续使用旧版本。
-6. 回滚只把当前指针指向已经验证过的旧版本，并写审计日志；不修改历史采集数据。
+5. 新采集入口解析当前发布模板和配置；新 `CollectionActivity`/`CollectionRun` 同时锁定模板版本、配置版本和 `export_snapshot_json`。
+6. 已有会话、审核和历史导出继续使用旧快照；入口切版不重解释旧材料。
+7. 回滚只把当前指针指向已经验证过的旧版本，并写审计日志；不修改历史采集数据。
 
 不允许管理员在浏览页面时隐式创建默认配置。只读请求不得写数据库或生成媒体文件。
+
+### 2.1 规则所有权
+
+- `TemplateVersion.field_export_json` 负责字段 key、列标题、顺序、类型、脱敏和明细/汇总/异常表角色。
+- `ProjectConfigVersion.export_policy_json` 负责目录层级、分类字段、文件命名、重名后缀、附件目录和工作表名称。
+- 两者在 `CollectionRun` 创建时规范化为 `export_snapshot_json`；导出服务只读快照。
+- 模板字段导出映射变更必须发布新模板版本；目录/命名/工作表变更只发布新配置版本。
+- 非学生项目不得使用学生固定工作表名称；学生内置预设保留 V1 的三个中文工作表名称。
 
 ## 3. 权限模型
 
@@ -40,6 +51,8 @@
 - viewer：只读统计和异常。
 
 V1 `/admin/` 继续由 `is_staff` 保护，先映射为内置学生项目的系统管理员/owner；不能因新增项目权限而放开旧管理入口。每个写入口统一经过维护锁、CSRF、权限检查、表单校验和审计。
+
+采用策略由活动配置而非模板字段决定：学生整班替换使用 `replace_scope`，员工使用 `record_revision`，资产使用 `global_claim`，活动报名使用 `append`。具体状态转移、唯一生效指针和补传失效规则见 [`V2_D1_D5_CONTRACTS.md`](V2_D1_D5_CONTRACTS.md)。
 
 ## 4. 配置校验重点
 
@@ -60,6 +73,9 @@ V1 `/admin/` 继续由 `is_staff` 保护，先映射为内置学生项目的系�
 
 - owner/editor/reviewer/exporter/viewer 的越权访问和跨项目隔离。
 - 草稿、发布、回滚、并发发布和旧会话版本锁定。
+- 多入口同时发布、入口切版、活动暂停/关闭、同一活动多 run 和采用版本唯一性。
+- 模板字段导出映射与项目导出策略分别改版，历史导出快照不随当前配置变化。
+- 学生整班替换、员工单记录更新、资产全局唯一、活动报名四种 adoption mode 及补传过期。
 - 只读 GET 无数据库写入。
 - 维护期间模板、班级、命名、上传开关写入全部拒绝且不返回 500。
 - 错误密码、错误二次确认、备份失败时零删除。

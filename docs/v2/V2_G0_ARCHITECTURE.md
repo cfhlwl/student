@@ -53,13 +53,17 @@ HTTP 层
 
 | 模型 | 主要字段 | 约束 |
 | --- | --- | --- |
-| `CollectionProject` | `id`、`slug`、`name`、`status`、`current_template_version`、`active_config_version`、`created_at` | `slug` 唯一；删除采用停用，不级联删除历史数据 |
-| `TemplateDefinition` | `project`、`key`、`name`、`preset`、`created_at` | 一个项目可有多个模板；内置预设不可删除 |
-| `TemplateVersion` | `template`、`version`、`state`、`schema_json`、`mapping_json`、`matching_json`、`export_json`、`schema_sha256`、`published_at` | `(template, version)` 唯一；发布后不可修改 |
+| `CollectionProject` | `id`、`slug`、`name`、`status`、`active_config_version`、`created_at` | `slug` 唯一；删除采用停用，不级联删除历史数据；模板入口不再由项目单一指针决定 |
+| `CollectionEntry` | `project`、`slug`、`is_default`、`scope_json`、`published_template_version`、`enabled` | `(project, slug)` 唯一；每个入口只有一个当前发布版本；项目最多一个默认入口；停用不使历史会话失效 |
+| `TemplateDefinition` | `project`、`key`、`name`、`preset`、`created_at` | 一个项目可有多个模板；内置预设不可删除；同一已发布版本可被多个入口复用 |
+| `TemplateVersion` | `template`、`version`、`state`、`schema_json`、`mapping_json`、`matching_json`、`field_export_json`、`schema_sha256`、`published_at` | `(template, version)` 唯一；发布后不可修改；字段导出映射归模板版本 |
+| `CollectionActivity` | `project`、`entry`、`scope_json`、`adoption_mode`、`status`、`opened_at`、`closed_at` | 活动不是一次提交；可有多个 `CollectionRun`；活动/范围的当前生效指针单独维护 |
 | `ProjectConfigVersion` | `project`、`version`、`state`、`settings_json`、`settings_sha256`、`created_by` | 发布后不可修改；项目只能有一个当前版本 |
-| `CollectionRun` | `project`、`template_version`、`config_version`、`scope_json`、`status`、`access_token_hash` | 采集时锁定模板和配置快照；历史记录不可被新配置重解释 |
-| `CollectionRecord` | `run`、`external_key`、`values_json`、`normalized_json`、`status` | 项目内按模板定义的唯一键校验；保留原始单元格错误 |
-| `RecordUniqueValue` | `project`、`template_version`、`field_key`、`scope_key`、`canonical_value`、`record` | 唯一索引承接动态字段唯一性，避免依赖 SQLite JSON 查询约束 |
+| `CollectionRun` | `activity`、`entry`、`template_version`、`config_version`、`scope_json`、`status`、`access_token_hash`、`export_snapshot_json` | 一次上传/提交版本；锁定模板、配置和导出快照；同一活动可有多个 run |
+| `RecordIdentity` | `project`、`stable_key`、`entity_type`、`current_record` | 逻辑实体跨历史 revision 稳定；例如学生、员工、资产、报名人 |
+| `CollectionRecord` | `run`、`identity`、`external_key`、`values_json`、`normalized_json`、`status`、`revision_no` | 一行数据的历史版本；有效指针不从最新模板重解释 |
+| `EffectiveVersion` | `activity`、`scope_key`、`identity`、`run`、`record`、`is_current` | partial unique index 保证活动范围内唯一生效版本；替换时保留旧版本并标记 superseded |
+| `RecordUniqueValue` | `project`、`field_key`、`namespace_kind`、`namespace_key`、`canonical_value`、`owner_identity`、`source_record`、`is_active` | partial unique index 不包含 template version 的项目/范围 key；跨版本全局唯一可执行 |
 | `CollectionAsset` | `project`、`run`、`record`、`kind`、`original_name`、`storage_name`、`mime`、`size`、`sha256` | 文件路径只由服务端生成；记录原始字节哈希和导入批次 |
 | `ReviewAction` | `run`/`record`、`action`、`actor`、`before_json`、`after_json`、`created_at` | 审核和人工匹配不可覆盖历史操作 |
 | `ProjectMember` | `project`、`user`、`role` | V2 先提供 `owner`、`editor`、`reviewer`、`exporter`、`viewer` 五级最小权限 |
@@ -68,7 +72,7 @@ HTTP 层
 
 ### 2.2 Schema 约束
 
-`TemplateVersion.schema_json` 只允许白名单字段：
+`TemplateVersion.schema_json` 只允许白名单字段；入口、活动、版本和导出归属的完整契约见 [`V2_D1_D5_CONTRACTS.md`](V2_D1_D5_CONTRACTS.md)。
 
 - `key`：稳定机器标识，发布后不可更改；
 - `label`：Excel 显示名称；
@@ -76,7 +80,7 @@ HTTP 层
 - `required`、`unique`、`max_length`、`pattern`、`choices`、`order`；
 - `excel`：列顺序、列宽、示例、说明；
 - `matching`：可作为照片/附件匹配键的字段及冲突策略；
-- `export`：是否进入统计、明细、异常工作表和文件名模板。
+- `export`：是否进入统计、明细、异常工作表和字段列映射；目录布局、命名和工作表名称属于 `ProjectConfigVersion.export_policy_json`。
 
 Schema 通过 JSON Schema 风格的服务端校验器检查。未知字段、非法表达式、路径片段、任意 Python 代码和任意 SQL 均拒绝保存。任何字段增加/删除都只产生新版本，不改变旧记录。
 
@@ -85,12 +89,13 @@ Schema 通过 JSON Schema 风格的服务端校验器检查。未知字段、非
 采用 expand -> backfill -> verify -> switch，禁止运行时 DDL：
 
 1. 增加通用表和 nullable 关联字段；不改 V1 现有列含义。
-2. 创建内置项目及“学生资料采集”模板草稿，读取旧 `HEADERS` 和旧枚举生成 Schema。
-3. 只读校验旧数据，生成对账报告：提交数、学生数、照片数、附件数、采用版本数、哈希差异。
-4. 显式命令 `migrate_legacy_collection --dry-run` 生成候选映射；管理员确认后才写入通用表。
-5. 双读验证：V1 `/submit`、V1 `/admin` 和旧导出继续读旧表；V2 项目页可读 adapter 数据。
-6. 新项目只写通用表；内置学生项目在兼容期仍由旧入口写旧表，避免线上行为突然改变。
-7. 经过完整回归后，才允许在单独发布阶段切换内置项目的写入口；切换可回滚，旧表保留。
+2. 创建内置项目、默认入口及“学生资料采集”模板草稿，读取旧 `HEADERS` 和旧枚举生成 Schema。
+3. 增加 `RecordIdentity`、`EffectiveVersion` 和 D2 的 partial unique indexes；先在隔离库验证 SQLite 迁移。
+4. 只读校验旧数据，生成对账报告：提交数、学生数、照片数、附件数、采用版本数、哈希差异。
+5. 显式命令 `migrate_legacy_collection --dry-run` 生成候选活动/范围/生效版本映射；管理员确认后才写入通用表。
+6. 双读验证：V1 `/submit`、V1 `/admin` 和旧导出继续读旧表；V2 项目页可读 adapter 数据。
+7. 新项目只写通用表；内置学生项目在兼容期仍由旧入口写旧表，避免线上行为突然改变。
+8. 经过完整回归后，才允许在单独发布阶段切换内置项目的写入口；切换可回滚，旧表保留。
 
 SQLite 注意事项：迁移脚本必须短事务、可重入、可中断恢复；大媒体不进入数据库；所有 backfill 分页并记录 checkpoint；失败时不删除旧表和原文件。
 
@@ -110,6 +115,7 @@ SQLite 注意事项：迁移脚本必须短事务、可重入、可中断恢复�
 ## 5. G0 通过标准
 
 - 设计不需要运行时 DDL；动态字段都由已校验 Schema + JSON/唯一值表承载。
+- D1–D5 的入口、唯一 claim、导出快照、状态机和升级恢复契约与 G1–G4 文档一致，详见 [`V2_D1_D5_CONTRACTS.md`](V2_D1_D5_CONTRACTS.md)。
 - V1 现有入口、模型、导出和备份格式有明确兼容边界。
 - 所有迁移都可 dry-run、可对账、可回滚，且不自动改生产资料。
 - Windows/Linux/Docker 的锁、路径、服务、备份差异已进入后续测试矩阵。
