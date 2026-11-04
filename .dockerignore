@@ -8,4 +8,6 @@ data
 backups
 staticfiles
 .env
+.r2-data
+.r2-media
 

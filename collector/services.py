@@ -1,5 +1,7 @@
 import hashlib
+import hmac
 import io
+import json
 import os
 import re
 import secrets
@@ -32,12 +34,13 @@ FIELD_MAP = {
     "姓名": "name", "性别": "gender", "学部": "department", "学年": "school_year",
     "班级": "class_name", "就读类型": "study_type",
 }
-HEADERS = ["姓名", "性别", "学部", "学年", "班级", "就读类型", "备注"]
-GRADE_BY_YEAR = {
+HEADERS = ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型", "备注"]
+LEGACY_GRADE_BY_YEAR = {
     "2026": {"middle": "初一", "high": "高一"},
     "2025": {"middle": "初二", "high": "高二"},
     "2024": {"middle": "初三", "high": "高三"},
 }
+STUDY_TYPE_VALUES = ("走读", "半走读", "住宿")
 
 
 @dataclass
@@ -83,6 +86,60 @@ def safe_excel_value(value):
     if value.startswith(("=", "+", "-", "@", "\t", "\r")):
         return "'" + value
     return value
+
+
+def upload_sha256(upload):
+    upload.seek(0)
+    digest = hashlib.sha256()
+    for chunk in upload.chunks():
+        digest.update(chunk)
+    upload.seek(0)
+    return digest.hexdigest()
+
+
+def _normalize_photo_manifest(value, expected_count):
+    if value in (None, "", []):
+        if expected_count:
+            raise ValidationError("照片清单不能为空，请重新选择照片后提交")
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValidationError("照片清单格式不正确，请重新选择文件") from exc
+    if not isinstance(value, list) or len(value) != expected_count:
+        raise ValidationError("照片清单与照片数量不一致，请重新选择文件")
+    manifest = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise ValidationError(f"第 {index} 个照片清单项格式不正确")
+        original_name = str(item.get("name") or "")
+        name = safe_filename(original_name)
+        if not original_name or name != original_name:
+            raise ValidationError(f"第 {index} 个照片文件名不安全")
+        try:
+            size = int(item.get("size"))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"第 {index} 个照片大小不正确") from exc
+        if size < 1:
+            raise ValidationError(f"第 {index} 个照片大小不正确")
+        sha256 = str(item.get("sha256") or "").lower()
+        if sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValidationError(f"第 {index} 个照片哈希不正确")
+        manifest.append({"name": name, "size": size, "sha256": sha256})
+    return manifest
+
+
+def _manifest_json_digest(manifest):
+    if not manifest:
+        return ""
+    payload = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _session_result_token(session_id):
+    payload = f"student-collector-result:{session_id}".encode("utf-8")
+    return hmac.new(settings.SECRET_KEY.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
 def image_bytes_info(upload):
@@ -141,17 +198,34 @@ def _text(value):
 def normalize_school_year(value):
     text = _text(value)
     match = re.fullmatch(r"(20\d{2})(?:[-/]20\d{2})?", text)
-    if not match or match.group(1) not in GRADE_BY_YEAR:
+    if not match or match.group(1) not in LEGACY_GRADE_BY_YEAR:
         raise ValidationError("学年只能填写 2024、2025 或 2026，例如 2026")
     return match.group(1)
 
 
-def grade_for(department_name, school_year):
+def normalize_grade(value, department_name=None):
+    grade = _text(value)
+    valid = {item[0] for item in ClassGroup.GRADES}
+    if grade not in valid:
+        raise ValidationError("年级只能填写初一、初二、初三、高一、高二或高三")
+    if department_name == "初中部" and not grade.startswith("初"):
+        raise ValidationError("初中部只能填写初一、初二或初三")
+    if department_name == "高中部" and not grade.startswith("高"):
+        raise ValidationError("高中部只能填写高一、高二或高三")
+    return grade
+
+
+def legacy_grade_for(department_name, school_year):
     department = "middle" if department_name == "初中部" else "high" if department_name == "高中部" else department_name
     try:
-        return GRADE_BY_YEAR[normalize_school_year(school_year)][department]
+        return LEGACY_GRADE_BY_YEAR[normalize_school_year(school_year)][department]
     except KeyError as exc:
         raise ValidationError("学部只能是初中部或高中部") from exc
+
+
+def grade_for(department_name, school_year):
+    """Legacy compatibility helper for old rosters that omitted the grade column."""
+    return legacy_grade_for(department_name, school_year)
 
 
 def parse_roster(upload):
@@ -190,10 +264,10 @@ def parse_roster(upload):
             row_errors.append("学部只能是初中部或高中部")
         try:
             record["学年"] = normalize_school_year(record.get("学年"))
-            record["年级"] = grade_for(record["学部"], record["学年"])
+            record["年级"] = normalize_grade(record["年级"], record["学部"]) if record.get("年级") else legacy_grade_for(record["学部"], record["学年"])
         except ValidationError as exc:
             row_errors.append(str(exc))
-        if record.get("就读类型") not in {"走读", "半走读", "住宿"}:
+        if record.get("就读类型") not in set(STUDY_TYPE_VALUES):
             row_errors.append("就读类型不正确")
         identity = (record.get("学年"), record.get("学部"), record.get("班级"), record.get("姓名"), record.get("性别"), record.get("就读类型"))
         if identity in seen:
@@ -222,7 +296,7 @@ def _class_from_record(record):
             class_group, _ = ClassGroup.objects.get_or_create(
                 department=department,
                 school_year=school_year,
-                grade=grade_for(record["学部"], record["学年"]),
+                grade=record["年级"],
                 name=record["班级"],
                 defaults={"is_active": True},
             )
@@ -310,24 +384,102 @@ def _check_storage_quota(additional_bytes):
         raise ValidationError(f"文件存储配额不足，当前配额为 {settings.MAX_STORAGE_MB} MB")
 
 
-def _create_submission_records(*, records, roster_name, roster_candidate, photo_inputs, document_inputs, note, ip_address):
-    scopes = {(r.get("学部"), r.get("学年"), r.get("班级")) for r in records}
+def _delete_submission_storage(submission_id):
+    """Remove a private directory left by an interrupted finalization."""
+    root = (Path(settings.MEDIA_ROOT) / "submissions" / str(submission_id)).resolve()
+    media_root = Path(settings.MEDIA_ROOT).resolve()
+    if root == media_root or media_root not in root.parents:
+        return
+    if root.exists():
+        shutil.rmtree(root)
+
+
+def _file_matches_expected(file_field, expected_size=None, expected_sha256=""):
+    """Return whether a private stored file is complete and, when available, hashed as expected."""
+    if not file_field or not file_field.name or not default_storage.exists(file_field.name):
+        return False
+    try:
+        digest = hashlib.sha256()
+        total = 0
+        with file_field.open("rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                digest.update(chunk)
+        if expected_size is not None and total != expected_size:
+            return False
+        return not expected_sha256 or hmac.compare_digest(digest.hexdigest(), expected_sha256)
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+
+
+def _submission_is_complete(submission, *, expected_student_count=None, expected_photo_count=None, expected_document_count=None):
+    """Check every durable part before an upload session may be reported complete."""
+    if not _file_matches_expected(submission.roster_file):
+        return False
+    if expected_student_count is not None and submission.students.count() != expected_student_count:
+        return False
+    photos = list(submission.photos.select_related("student"))
+    if expected_photo_count is not None and len(photos) != expected_photo_count:
+        return False
+    documents = list(submission.documents.all())
+    if expected_document_count is not None and len(documents) != expected_document_count:
+        return False
+    for photo in photos:
+        if photo.student_id and photo.student.submission_id != submission.id:
+            return False
+        if not _file_matches_expected(photo.file, photo.size, photo.sha256):
+            return False
+    for document in documents:
+        if not _file_matches_expected(document.file, document.size):
+            return False
+    return AuditLog.objects.filter(
+        action="public_submit", target_type="Submission", target_id=str(submission.id)
+    ).exists()
+
+
+def _create_submission_records(*, records, roster_name, roster_candidate, photo_inputs, document_inputs, note, ip_address, access_token=None, expected_student_count=None, expected_photo_count=None, expected_document_count=None):
+    scopes = {(r.get("学部"), r.get("学年"), r.get("年级"), r.get("班级")) for r in records}
     if len(scopes) != 1:
-        raise ValidationError("一次提交只能包含同一学部、学年和班级的学生")
+        raise ValidationError("一次提交只能包含同一学部、学年、年级和班级的学生")
+    if access_token:
+        access_hash = hashlib.sha256(access_token.encode()).hexdigest()
+        existing_submission = _with_db_retry(lambda: Submission.objects.filter(access_token_hash=access_hash).first())
+        if existing_submission is not None:
+            if _submission_is_complete(
+                existing_submission,
+                expected_student_count=expected_student_count,
+                expected_photo_count=expected_photo_count,
+                expected_document_count=expected_document_count,
+            ):
+                return existing_submission, access_token
+            partial_id = existing_submission.id
+            existing_files = [existing_submission.roster_file.name]
+            existing_files.extend(existing_submission.photos.values_list("file", flat=True))
+            existing_files.extend(existing_submission.documents.values_list("file", flat=True))
+            # A recovered finalization may still reference staged session files. They are
+            # the inputs for the retry and must not be deleted with the partial Submission.
+            protected_names = {roster_candidate.stored_name}
+            protected_names.update(item.stored_name for item in photo_inputs if item.stored_name)
+            protected_names.update(item.stored_name for item in document_inputs if item.stored_name)
+            existing_submission.delete()
+            _delete_stored_files(name for name in existing_files if name and name not in protected_names)
+            _delete_submission_storage(partial_id)
     collection_scope = _with_db_retry(lambda: AppSetting.get_value("collection_scope", "all"))
     if collection_scope == "configured":
         missing_scopes = []
-        for department_name, year_name, class_name in scopes:
+        for department_name, year_name, grade_name, class_name in scopes:
             department = "middle" if department_name == "初中部" else "high"
-            grade = grade_for(department_name, year_name)
-            configured = _with_db_retry(lambda: ClassGroup.objects.filter(department=department, school_year__name=year_name, grade=grade, name=class_name, is_active=True).exists())
+            configured = _with_db_retry(lambda: ClassGroup.objects.filter(department=department, school_year__name=year_name, grade=grade_name, name=class_name, is_active=True).exists())
             if not configured:
-                missing_scopes.append(f"{department_name}/{year_name}/{grade}/{class_name}")
+                missing_scopes.append(f"{department_name}/{year_name}/{grade_name}/{class_name}")
         if missing_scopes:
             raise ValidationError("当前仅允许已配置班级提交：" + "、".join(missing_scopes))
 
     school_year, class_group = _class_from_record(records[0])
-    token = Submission.make_token()
+    token = access_token or Submission.make_token()
     matches = _match_photos(records, photo_inputs)
     approved_names = _with_db_retry(lambda: set(
         Student.objects.filter(
@@ -455,29 +607,51 @@ def _check_upload_token(session, token):
         raise ValidationError("上传凭证无效")
 
 
-def start_upload_session(*, roster_upload, document_uploads, expected_photo_count=0, note="", ip_address=None):
+def start_upload_session(*, roster_upload, document_uploads, expected_photo_count=0, expected_document_count=None, photo_manifest=None, roster_fingerprint="", note="", ip_address=None):
     if expected_photo_count < 0 or expected_photo_count > settings.MAX_PHOTOS_PER_SUBMISSION:
         raise ValidationError(f"照片数量不能超过 {settings.MAX_PHOTOS_PER_SUBMISSION} 张")
+    if expected_document_count is None:
+        expected_document_count = len(document_uploads)
+    if expected_document_count < 0 or expected_document_count > settings.MAX_DOCUMENTS_PER_SUBMISSION:
+        raise ValidationError(f"文档数量不能超过 {settings.MAX_DOCUMENTS_PER_SUBMISSION} 个")
     if len(document_uploads) > settings.MAX_DOCUMENTS_PER_SUBMISSION:
         raise ValidationError(f"文档数量不能超过 {settings.MAX_DOCUMENTS_PER_SUBMISSION} 个")
     records = parse_roster(roster_upload)
+    normalized_manifest = _normalize_photo_manifest(photo_manifest, expected_photo_count)
     documents = _prepare_documents(document_uploads)
+    if documents and len(documents) != expected_document_count:
+        raise ValidationError("文档清单与文档数量不一致，请重新选择文件")
     _check_storage_quota(roster_upload.size + sum(item.size for item in documents))
+    roster_sha256 = upload_sha256(roster_upload)
     token = UploadSession.make_token()
-    session = UploadSession.objects.create(
+    session = _with_db_retry(lambda: UploadSession.objects.create(
         access_token_hash=hashlib.sha256(token.encode()).hexdigest(),
         roster_original_name=_safe_upload_name(roster_upload),
+        roster_sha256=roster_sha256,
+        roster_fingerprint=str(roster_fingerprint or "")[:255],
         note=note[:500],
+        expected_student_count=len(records),
         expected_photo_count=expected_photo_count,
-        expected_document_count=len(documents),
-    )
+        expected_document_count=expected_document_count,
+        photo_manifest=normalized_manifest,
+        photo_manifest_digest=_manifest_json_digest(normalized_manifest),
+    ))
     stored_names = []
     try:
         roster_name = default_storage.save(f"upload_sessions/{session.id}/roster/{_safe_upload_name(roster_upload)}", roster_upload)
         stored_names.append(roster_name)
-        UploadSession.objects.filter(pk=session.pk).update(roster_file=roster_name)
+        _with_db_retry(lambda: UploadSession.objects.filter(pk=session.pk).update(roster_file=roster_name))
         if documents:
-            stage_upload_batch(session, "document", 0, documents, already_prepared=True)
+            stage_upload_batch(
+                session.id,
+                "document",
+                0,
+                documents,
+                manifest_digest=session.photo_manifest_digest,
+                roster_fingerprint=session.roster_fingerprint,
+                trusted_internal=True,
+                already_prepared=True,
+            )
         return session, token, len(records)
     except Exception:
         _delete_stored_files(stored_names)
@@ -485,7 +659,7 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         raise
 
 
-def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, already_prepared=False):
+def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manifest_digest=None, roster_fingerprint=None, trusted_internal=False, already_prepared=False):
     if kind not in {"photo", "document"}:
         raise ValidationError("上传批次类型不正确")
     if sequence < 0:
@@ -496,13 +670,21 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, alrea
         raise ValidationError(f"每批最多上传 {settings.MAX_PHOTOS_PER_BATCH} 张照片")
     if kind == "document" and len(uploads) > settings.MAX_DOCUMENTS_PER_BATCH:
         raise ValidationError(f"每批最多上传 {settings.MAX_DOCUMENTS_PER_BATCH} 个文档")
+    if not trusted_internal and not token:
+        raise ValidationError("上传凭证不能为空")
     prepared = uploads if already_prepared else (_prepare_photos(uploads) if kind == "photo" else _prepare_documents(uploads))
     if sum(item.size for item in prepared) > settings.MAX_BATCH_UPLOAD_SIZE_MB * 1024 * 1024:
         raise ValidationError(f"本批文件总大小不能超过 {settings.MAX_BATCH_UPLOAD_SIZE_MB} MB")
     digest = _manifest_digest(prepared)
-    session = UploadSession.objects.get(pk=session_id)
-    if token is not None:
+    session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
+    if not trusted_internal:
         _check_upload_token(session, token)
+    elif token is not None:
+        _check_upload_token(session, token)
+    if session.photo_manifest_digest and manifest_digest != session.photo_manifest_digest:
+        raise ValidationError("照片清单已变化，请重新选择 Excel 和照片后提交")
+    if session.roster_fingerprint and roster_fingerprint != session.roster_fingerprint:
+        raise ValidationError("Excel 文件已变化，请重新选择 Excel 和照片后提交")
     if session.status != "pending":
         raise ValidationError("上传会话已结束")
 
@@ -511,11 +693,28 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, alrea
             locked_session = UploadSession.objects.select_for_update().get(pk=session_id)
             if locked_session.status != "pending":
                 raise ValidationError("上传会话已结束")
+            if locked_session.photo_manifest_digest and manifest_digest != locked_session.photo_manifest_digest:
+                raise ValidationError("照片清单已变化，请重新选择 Excel 和照片后提交")
+            if locked_session.roster_fingerprint and roster_fingerprint != locked_session.roster_fingerprint:
+                raise ValidationError("Excel 文件已变化，请重新选择 Excel 和照片后提交")
             existing = UploadBatch.objects.filter(session=locked_session, kind=kind, sequence=sequence).first()
             if existing:
                 if existing.digest != digest or existing.count != len(prepared):
                     raise ValidationError("该上传批次已存在不同内容")
                 return existing
+            if kind == "photo" and locked_session.photo_manifest:
+                previous = list(UploadBatch.objects.filter(session=locked_session, kind="photo").order_by("sequence"))
+                if [item.sequence for item in previous] != list(range(sequence)):
+                    raise ValidationError("照片批次必须按顺序上传，请从上一个成功批次继续")
+                offset = sum(item.count for item in previous)
+                expected = locked_session.photo_manifest[offset:offset + len(prepared)]
+                if len(expected) != len(prepared):
+                    raise ValidationError("照片数量超过提交时的照片清单")
+                for expected_item, actual_item in zip(expected, prepared):
+                    if expected_item["name"] != actual_item.original_name or expected_item["size"] != actual_item.size:
+                        raise ValidationError("照片名称、大小或顺序已变化，请重新选择 Excel 和照片后提交")
+                    if expected_item.get("sha256") and expected_item["sha256"] != actual_item.sha256:
+                        raise ValidationError("照片内容已变化，请重新选择 Excel 和照片后提交")
             return None
 
     already_saved = _with_db_retry(existing_batch)
@@ -557,16 +756,46 @@ def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, alrea
         raise
 
 
-def finalize_upload_session(*, session_id, token, ip_address=None):
-    session = UploadSession.objects.get(pk=session_id)
+def _mark_upload_session_completed(session_id, submission):
+    with transaction.atomic():
+        locked = UploadSession.objects.select_for_update().get(pk=session_id)
+        locked.status = "completed"
+        locked.completed_submission = submission
+        locked.save(update_fields=["status", "completed_submission", "updated_at"])
+
+
+def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_fingerprint=None, ip_address=None):
+    session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
     _check_upload_token(session, token)
 
     def claim_session():
         with transaction.atomic():
             locked = UploadSession.objects.select_for_update().select_related("completed_submission").get(pk=session_id)
             _check_upload_token(locked, token)
+            if locked.photo_manifest_digest and manifest_digest != locked.photo_manifest_digest:
+                raise ValidationError("照片清单已变化，请重新选择 Excel 和照片后提交")
+            if locked.roster_fingerprint and roster_fingerprint != locked.roster_fingerprint:
+                raise ValidationError("Excel 文件已变化，请重新选择 Excel 和照片后提交")
             if locked.status == "completed" and locked.completed_submission_id:
                 return locked.completed_submission, False
+            if locked.status == "finalizing":
+                stable_token = _session_result_token(session_id)
+                recovered = Submission.objects.filter(access_token_hash=hashlib.sha256(stable_token.encode()).hexdigest()).first()
+                stale_at = timezone.now() - timedelta(seconds=settings.UPLOAD_FINALIZING_TIMEOUT_SECONDS)
+                if recovered is not None and _submission_is_complete(
+                    recovered,
+                    expected_student_count=locked.expected_student_count or None,
+                    expected_photo_count=locked.expected_photo_count,
+                    expected_document_count=locked.expected_document_count,
+                ):
+                    locked.status = "completed"
+                    locked.completed_submission = recovered
+                    locked.save(update_fields=["status", "completed_submission", "updated_at"])
+                    return recovered, False
+                if locked.updated_at > stale_at:
+                    raise ValidationError("上传会话正在完成，请稍后重试")
+                locked.status = "pending"
+                locked.save(update_fields=["status", "updated_at"])
             if locked.status != "pending":
                 raise ValidationError("上传会话正在完成或已结束")
             locked.status = "finalizing"
@@ -575,9 +804,7 @@ def finalize_upload_session(*, session_id, token, ip_address=None):
 
     claimed, should_finalize = _with_db_retry(claim_session)
     if not should_finalize:
-        new_token = Submission.make_token()
-        Submission.objects.filter(pk=claimed.pk).update(access_token_hash=hashlib.sha256(new_token.encode()).hexdigest())
-        return claimed, new_token
+        return claimed, _session_result_token(session_id)
     session = claimed
     try:
         roster_path = session.roster_file.name
@@ -596,6 +823,7 @@ def finalize_upload_session(*, session_id, token, ip_address=None):
         photo_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in photo_rows]
         document_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in document_rows]
         roster_candidate = PreparedUpload(session.roster_original_name, session.roster_original_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 0, "", stored_name=roster_path)
+        result_token = _session_result_token(session.id)
         submission, result_token = _create_submission_records(
             records=records,
             roster_name=session.roster_original_name,
@@ -604,18 +832,16 @@ def finalize_upload_session(*, session_id, token, ip_address=None):
             document_inputs=document_inputs,
             note=session.note,
             ip_address=ip_address,
+            access_token=result_token,
+            expected_student_count=len(records),
+            expected_photo_count=session.expected_photo_count,
+            expected_document_count=session.expected_document_count,
         )
-        def complete():
-            with transaction.atomic():
-                locked = UploadSession.objects.select_for_update().get(pk=session.id)
-                locked.status = "completed"
-                locked.completed_submission = submission
-                locked.save(update_fields=["status", "completed_submission", "updated_at"])
-        _with_db_retry(complete)
+        _with_db_retry(lambda: _mark_upload_session_completed(session.id, submission))
         _delete_stored_files([roster_path] + [row.file.name for row in photo_rows + document_rows])
         return submission, result_token
     except Exception:
-        UploadSession.objects.filter(pk=session.id, status="finalizing").update(status="pending")
+        _with_db_retry(lambda: UploadSession.objects.filter(pk=session.id, status="finalizing").update(status="pending"))
         raise
 
 
@@ -654,16 +880,22 @@ def review_submission_version(*, submission_id, action, actor, ip_address=None):
 
 
 def render_filename(student, rule, used):
+    gender_code = ""
+    if student.gender == "男":
+        gender_code = rule.male_code
+    elif student.gender == "女":
+        gender_code = rule.female_code
     values = {
         "{姓名}": student.name,
-        "{性别编号}": rule.male_code if student.gender == "男" else rule.female_code,
+        "{性别编号}": gender_code,
         "{学部}": _department_code(student.department),
         "{班级}": student.class_name,
         "{就读类型}": student.study_type,
     }
     base = safe_filename(rule.template)
     for token, value in values.items():
-        base = base.replace(token, safe_filename(value))
+        base = base.replace(token, safe_filename(value, fallback=""))
+    base = base or safe_filename(student.name)
     source_suffix = PurePosixPath(student.photo.original_name).suffix.lower() or ".jpg"
     candidate = f"{base}{source_suffix}"
     counter = 2
@@ -711,6 +943,39 @@ def _student_photo(student):
         return None
 
 
+class ExportFileError(OSError):
+    """A source file could not be copied completely into the export staging area."""
+
+
+def _stage_export_file(file_field, *, expected_size=None, expected_sha256=""):
+    """Read a source fully before it is allowed to become a ZIP member."""
+    Path(settings.EXPORT_TEMP_DIR).mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="student-export-source-", dir=settings.EXPORT_TEMP_DIR)
+    os.close(fd)
+    temp_path = Path(temp_name)
+    total = 0
+    digest = hashlib.sha256()
+    try:
+        with file_field.open("rb") as source, temp_path.open("wb") as target:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+                digest.update(chunk)
+                total += len(chunk)
+        if expected_size is not None and total != expected_size:
+            raise ExportFileError(f"文件大小不一致：期望 {expected_size}，实际 {total}")
+        if expected_sha256 and not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+            raise ExportFileError("文件 SHA256 不一致")
+        return temp_path
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        temp_path.unlink(missing_ok=True)
+        if isinstance(exc, ExportFileError):
+            raise
+        raise ExportFileError(str(exc)) from exc
+
+
 def export_students_to_tempfile(filters, actor=None, ip_address=None):
     qs = Student.objects.select_related("submission", "school_year").filter(submission__status="approved")
     for key in ["school_year__name", "department", "grade", "class_name", "gender", "study_type"]:
@@ -732,38 +997,8 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
             for group_key, group_students in groups.items():
                 dept, grade, class_name = group_key
                 class_dir = "/".join(safe_filename(v) for v in [_department_code(dept), grade, class_name])
-                category_groups = defaultdict(list)
-                if split_study_types:
-                    for student in group_students: category_groups[student.study_type].append(student)
-                else:
-                    category_groups[""] = group_students
-                for study_type in study_type_order if split_study_types else [""]:
-                    category_students = category_groups.get(study_type, [])
-                    if not category_students:
-                        continue
-                    used, anomalies = set(), []
-                    category_dir = f"{class_dir}/{safe_filename(study_type)}" if split_study_types else class_dir
-                    for student in category_students:
-                        student._export_name = ""
-                        student._export_status = student.get_match_status_display()
-                        photo = _student_photo(student)
-                        if student.match_status == "matched" and photo is not None:
-                            candidate_name = render_filename(student, rule, used)
-                            try:
-                                with photo.file.open("rb") as source, archive.open(f"{category_dir}/学生照片/{candidate_name}", "w") as target:
-                                    shutil.copyfileobj(source, target, length=1024 * 1024)
-                            except (FileNotFoundError, OSError, ValueError) as exc:
-                                student._export_status = "文件缺失"
-                                anomalies.append(("文件缺失", student.name, f"照片无法读取：{photo.file.name}；{exc}"))
-                            else:
-                                student._export_name = candidate_name
-                                student._export_status = "已导出"
-                        else:
-                            anomalies.append((student.get_match_status_display(), student.name, "没有可导出的已匹配照片"))
-                    archive.writestr(f"{category_dir}/学生统计表.xlsx", _write_workbook(category_students, f"{category_dir}", anomalies))
-                    anomalies_total.extend(anomalies)
-
                 class_submissions = list(Submission.objects.filter(students__in=group_students).distinct())
+                class_file_anomalies = []
                 roster_names = set()
                 for submission in class_submissions:
                     if submission.roster_file:
@@ -773,11 +1008,17 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                             suffix = PurePosixPath(roster_name).suffix
                             roster_name = f"{str(submission.id)[:8]}_{stem}{suffix}"
                         roster_names.add(roster_name)
+                        staged_roster = None
                         try:
-                            with submission.roster_file.open("rb") as source, archive.open(f"{class_dir}/学生名单/{roster_name}", "w") as target:
-                                shutil.copyfileobj(source, target, length=1024 * 1024)
-                        except (FileNotFoundError, OSError, ValueError) as exc:
-                            anomalies_total.append(("文件缺失", "学生名单", f"{roster_name}：{exc}"))
+                            staged_roster = _stage_export_file(submission.roster_file, expected_size=submission.roster_file.size)
+                        except (ExportFileError, FileNotFoundError, OSError, ValueError) as exc:
+                            class_file_anomalies.append(("文件缺失", "学生名单", f"{roster_name}：{exc}"))
+                        else:
+                            # Do not create the ZIP member until the complete source is staged.
+                            archive.write(staged_roster, f"{class_dir}/学生名单/{roster_name}")
+                        finally:
+                            if staged_roster is not None:
+                                staged_roster.unlink(missing_ok=True)
 
                 document_names = set()
                 for document in SubmissionDocument.objects.filter(submission__in=class_submissions).distinct():
@@ -787,11 +1028,56 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                         suffix = PurePosixPath(document_name).suffix
                         document_name = f"{str(document.id)}_{stem}{suffix}"
                     document_names.add(document_name)
+                    staged_document = None
                     try:
-                        with document.file.open("rb") as source, archive.open(f"{class_dir}/相关文档/{document_name}", "w") as target:
-                            shutil.copyfileobj(source, target, length=1024 * 1024)
-                    except (FileNotFoundError, OSError, ValueError) as exc:
-                        anomalies_total.append(("文件缺失", "相关文档", f"{document_name}：{exc}"))
+                        staged_document = _stage_export_file(document.file, expected_size=document.size)
+                    except (ExportFileError, FileNotFoundError, OSError, ValueError) as exc:
+                        class_file_anomalies.append(("文件缺失", "相关文档", f"{document_name}：{exc}"))
+                    else:
+                        # Archive I/O errors intentionally escape and roll back the whole temporary ZIP.
+                        archive.write(staged_document, f"{class_dir}/相关文档/{document_name}")
+                    finally:
+                        if staged_document is not None:
+                            staged_document.unlink(missing_ok=True)
+
+                category_groups = defaultdict(list)
+                if split_study_types:
+                    for student in group_students: category_groups[student.study_type].append(student)
+                else:
+                    category_groups[""] = group_students
+                for study_type in study_type_order if split_study_types else [""]:
+                    category_students = category_groups.get(study_type, [])
+                    if not category_students:
+                        continue
+                    used, photo_anomalies = set(), []
+                    category_dir = f"{class_dir}/{safe_filename(study_type)}" if split_study_types else class_dir
+                    for student in category_students:
+                        student._export_name = ""
+                        student._export_status = student.get_match_status_display()
+                        photo = _student_photo(student)
+                        if student.match_status == "matched" and photo is not None:
+                            candidate_name = render_filename(student, rule, used)
+                            staged_photo = None
+                            try:
+                                staged_photo = _stage_export_file(photo.file, expected_size=photo.size, expected_sha256=photo.sha256)
+                            except ExportFileError as exc:
+                                student._export_status = "文件缺失"
+                                photo_anomalies.append(("文件缺失", student.name, f"照片无法读取：{photo.file.name}；{exc}"))
+                            else:
+                                # Only write a ZIP member after the entire source has been read and verified.
+                                # An archive I/O error aborts and removes the whole temporary ZIP; it must not
+                                # be downgraded to a successful-looking truncated member.
+                                archive.write(staged_photo, f"{category_dir}/学生照片/{candidate_name}")
+                                student._export_name = candidate_name
+                                student._export_status = "已导出"
+                            finally:
+                                if staged_photo is not None:
+                                    staged_photo.unlink(missing_ok=True)
+                        else:
+                            photo_anomalies.append((student.get_match_status_display(), student.name, "没有可导出的已匹配照片"))
+                    archive.writestr(f"{category_dir}/学生统计表.xlsx", _write_workbook(category_students, f"{category_dir}", photo_anomalies + class_file_anomalies))
+                    anomalies_total.extend(photo_anomalies)
+                anomalies_total.extend(class_file_anomalies)
             if len(groups) > 1:
                 archive.writestr("总统计表.xlsx", _write_workbook(students, "跨班级导出", anomalies_total))
         _with_db_retry(lambda: AuditLog.objects.create(actor=actor, action="export_students", target_type="Student", detail={"filters": filters, "count": len(students)}, ip_address=ip_address))
@@ -902,9 +1188,9 @@ def template_bytes():
     sheet.title = "学生名单"
     last_column = get_column_letter(len(HEADERS))
     sheet.merge_cells(f"A1:{last_column}1")
-    sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、班级、就读类型为必填；年级由学部和学年自动判断。"
+    sheet["A1"] = "填写说明：一行一位学生；姓名、学部、学年、年级、班级、就读类型为必填；学年是当前在读学年的起始年份，不是入学年份。"
     sheet.merge_cells(f"A2:{last_column}2")
-    sheet["A2"] = "学年只能填写 2024、2025 或 2026；高中部对应高三、高二、高一，初中部对应初三、初二、初一；照片默认按姓名匹配。"
+    sheet["A2"] = "同一学年可填写初一、初二、初三、高一、高二或高三；旧版没有年级列的名单仍按旧学年映射兼容；照片默认按姓名匹配。"
     for cell_ref in ("A1", "A2"):
         sheet[cell_ref].font = Font(bold=True, color="FFFFFF" if cell_ref == "A1" else "17233B")
         sheet[cell_ref].fill = PatternFill("solid", fgColor="17233B" if cell_ref == "A1" else "E8F5F2")
@@ -913,7 +1199,7 @@ def template_bytes():
         cell = sheet.cell(row=4, column=col, value=header)
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="E76F3C")
-    for col, value in enumerate(["示例同学", "男", "高中部", "2026", "1", "走读", "虚构示例，仅用于测试"], start=1):
+    for col, value in enumerate(["示例同学", "男", "高中部", "2026", "高一", "1", "走读", "虚构示例，仅用于测试"], start=1):
         sheet.cell(row=5, column=col, value=value)
     sheet.freeze_panes = "A5"
     for col in range(1, len(HEADERS) + 1): sheet.column_dimensions[get_column_letter(col)].width = 18

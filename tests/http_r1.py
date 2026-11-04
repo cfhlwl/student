@@ -76,8 +76,11 @@ def main():
     csrf = csrf_token(page.decode("utf-8"))
     common = {"X-CSRFToken": csrf, "Referer": BASE_URL + "/submit"}
     roster = workbook_bytes()
+    photos = [(f"HTTP学生{i:02d}.jpg", photo_bytes(i)) for i in range(50)]
+    manifest = [{"name": name, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()} for name, payload in photos]
+    roster_fingerprint = hashlib.sha256(roster).hexdigest()
     body, content_type = multipart(
-        [("expected_photo_count", "50"), ("note", "R1真实HTTP")],
+        [("expected_photo_count", "50"), ("photo_manifest", json.dumps(manifest, ensure_ascii=False)), ("roster_fingerprint", roster_fingerprint), ("note", "R1真实HTTP")],
         [("roster", "名单.xlsx", roster, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")],
     )
     common["Content-Type"] = content_type
@@ -85,12 +88,12 @@ def main():
     assert status == 200, raw
     state = json.loads(raw)
     for batch_no in range(3):
-        files = [("photos", f"HTTP学生{batch_no * 20 + i:02d}.jpg", photo_bytes(batch_no * 20 + i), "image/jpeg") for i in range(20 if batch_no < 2 else 10)]
-        body, content_type = multipart([("batch_no", str(batch_no)), ("upload_token", state["upload_token"])], files)
+        files = [("photos", name, payload, "image/jpeg") for name, payload in photos[batch_no * 20:batch_no * 20 + (20 if batch_no < 2 else 10)]]
+        body, content_type = multipart([("batch_no", str(batch_no)), ("upload_token", state["upload_token"]), ("manifest_digest", state["photo_manifest_digest"]), ("roster_fingerprint", roster_fingerprint)], files)
         common["Content-Type"] = content_type
         status, _, raw = client.request(f"/submit/upload/{state['upload_id']}/photos/", "POST", body, common)
         assert status == 200, raw
-    body, content_type = multipart([("upload_token", state["upload_token"])], [])
+    body, content_type = multipart([("upload_token", state["upload_token"]), ("manifest_digest", state["photo_manifest_digest"]), ("roster_fingerprint", roster_fingerprint)], [])
     common["Content-Type"] = content_type
     status, _, raw = client.request(f"/submit/upload/{state['upload_id']}/complete/", "POST", body, common)
     assert status == 200, raw
@@ -109,7 +112,7 @@ def main():
     review_body = urllib.parse.urlencode({"action": "approved", "csrfmiddlewaretoken": review_token}).encode()
     status, _, _ = client.request(f"/admin/submissions/{result['submission_id']}/review/", "POST", review_body, {"Content-Type": "application/x-www-form-urlencoded", "Referer": BASE_URL + "/admin/submissions/", "X-CSRFToken": review_token})
     assert status in {200, 302}
-    status, _, payload = client.request("/admin/export.zip?school_year=2026")
+    status, _, payload = client.request("/admin/export.zip?school_year=2026&class_name=1")
     assert status == 200 and payload[:2] == b"PK"
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         photo_names = [name for name in archive.namelist() if name.lower().endswith(".jpg")]

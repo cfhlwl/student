@@ -1,0 +1,8 @@
+services:
+  web:
+    volumes:
+      - ./.r2-data:/app/data
+      - ./.r2-media:/app/media
+  nginx:
+    ports:
+      - "18081:80"

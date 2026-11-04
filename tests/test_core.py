@@ -51,7 +51,7 @@ def test_duplicate_excel_row_and_cross_class_are_rejected():
     with pytest.raises(ValidationError, match="Excel 存在逐行错误"):
         create_submission(roster_upload=excel_upload(duplicate), photo_uploads=[], document_uploads=[])
     cross_class = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-002", "李四", "女", "高中部", "2026-2027", "高一", "2", "住宿", "", ""]]
-    with pytest.raises(ValidationError, match="一次提交只能包含同一学部、学年和班级"):
+    with pytest.raises(ValidationError, match="一次提交只能包含同一学部、学年、年级和班级"):
         create_submission(roster_upload=excel_upload(cross_class), photo_uploads=[], document_uploads=[])
 
 
@@ -252,8 +252,8 @@ def test_export_escapes_formula_like_user_values(settings, tmp_path):
 def test_template_has_expected_columns():
     book = load_workbook(io.BytesIO(template_bytes()), read_only=True)
     rows = list(book.active.values)
-    assert rows[3][:7] == ("姓名", "性别", "学部", "学年", "班级", "就读类型", "备注")
-    assert rows[4][:6] == ("示例同学", "男", "高中部", "2026", "1", "走读")
+    assert rows[3][:8] == ("姓名", "性别", "学部", "学年", "年级", "班级", "就读类型", "备注")
+    assert rows[4][:7] == ("示例同学", "男", "高中部", "2026", "高一", "1", "走读")
 
 
 def test_parser_accepts_template_instruction_rows():

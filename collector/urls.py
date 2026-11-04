@@ -2,13 +2,14 @@ from django.urls import path
 
 from .views import (
     StaffLoginView, StaffLogoutView, admin_classes, admin_dashboard, admin_naming, admin_students,
-    admin_submissions, clear_test_data, download_template, export_zip, manual_match, protected_document, protected_photo, public_submit, review_submission, submit_result, toggle_upload, upload_complete, upload_photo_batch, upload_start,
+    admin_submissions, clear_test_data, download_template, export_zip, manual_match, protected_document, protected_photo, public_submit, review_submission, submit_result, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start,
 )
 
 urlpatterns = [
     path("submit", public_submit, name="submit"),
     path("submit/upload/start/", upload_start, name="upload-start"),
     path("submit/upload/<uuid:session_id>/photos/", upload_photo_batch, name="upload-photo-batch"),
+    path("submit/upload/<uuid:session_id>/documents/", upload_document_batch, name="upload-document-batch"),
     path("submit/upload/<uuid:session_id>/complete/", upload_complete, name="upload-complete"),
     path("submit/template.xlsx", download_template, name="submit-template"),
     path("submit/result/<uuid:submission_id>/", submit_result, name="submit-result"),

@@ -16,7 +16,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, UploadSession
-from .services import ValidationError, clear_all_collection_data, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, normalize_school_year, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, validate_naming_rule
+from .services import ValidationError, clear_all_collection_data, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, normalize_grade, normalize_school_year, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, validate_naming_rule
 
 
 def client_ip(request):
@@ -70,20 +70,56 @@ def upload_start(request):
             roster_upload=request.FILES.get("roster"),
             document_uploads=request.FILES.getlist("documents"),
             expected_photo_count=expected_photo_count,
+            expected_document_count=int(request.POST.get("expected_document_count", str(len(request.FILES.getlist("documents"))))),
+            photo_manifest=request.POST.get("photo_manifest", ""),
+            roster_fingerprint=request.POST.get("roster_fingerprint", ""),
             note=request.POST.get("note", ""),
             ip_address=client_ip(request),
         )
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
-    return JsonResponse({"upload_id": str(session.id), "upload_token": token, "roster_count": roster_count, "expected_photo_count": expected_photo_count})
+    return JsonResponse({
+        "upload_id": str(session.id),
+        "upload_token": token,
+        "roster_count": roster_count,
+        "expected_photo_count": expected_photo_count,
+        "photo_manifest_digest": session.photo_manifest_digest,
+    })
 
 
 @require_POST
 def upload_photo_batch(request, session_id):
     try:
         sequence = int(request.POST.get("batch_no", "-1"))
-        UploadSession.objects.get(pk=session_id)
-        batch, count = stage_upload_batch(session_id, "photo", sequence, request.FILES.getlist("photos"), token=request.POST.get("upload_token"))
+        batch, count = stage_upload_batch(
+            session_id,
+            "photo",
+            sequence,
+            request.FILES.getlist("photos"),
+            token=request.POST.get("upload_token"),
+            manifest_digest=request.POST.get("manifest_digest", ""),
+            roster_fingerprint=request.POST.get("roster_fingerprint"),
+        )
+    except UploadSession.DoesNotExist:
+        return JsonResponse({"error": "上传会话不存在"}, status=404)
+    except (ValidationError, TypeError, ValueError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse({"batch_no": batch.sequence, "accepted": count})
+
+
+@require_POST
+def upload_document_batch(request, session_id):
+    try:
+        sequence = int(request.POST.get("batch_no", "-1"))
+        batch, count = stage_upload_batch(
+            session_id,
+            "document",
+            sequence,
+            request.FILES.getlist("documents"),
+            token=request.POST.get("upload_token", ""),
+            manifest_digest=request.POST.get("manifest_digest", ""),
+            roster_fingerprint=request.POST.get("roster_fingerprint"),
+        )
     except UploadSession.DoesNotExist:
         return JsonResponse({"error": "上传会话不存在"}, status=404)
     except (ValidationError, TypeError, ValueError) as exc:
@@ -94,7 +130,13 @@ def upload_photo_batch(request, session_id):
 @require_POST
 def upload_complete(request, session_id):
     try:
-        submission, token = finalize_upload_session(session_id=session_id, token=request.POST.get("upload_token", ""), ip_address=client_ip(request))
+        submission, token = finalize_upload_session(
+            session_id=session_id,
+            token=request.POST.get("upload_token", ""),
+            manifest_digest=request.POST.get("manifest_digest", ""),
+            roster_fingerprint=request.POST.get("roster_fingerprint"),
+            ip_address=client_ip(request),
+        )
     except UploadSession.DoesNotExist:
         return JsonResponse({"error": "上传会话不存在"}, status=404)
     except ValidationError as exc:
@@ -298,17 +340,18 @@ def admin_classes(request):
             return redirect("admin-classes")
         year_name = request.POST.get("school_year", "").strip()
         department = request.POST.get("department", "")
+        grade_name = request.POST.get("grade", "").strip()
         class_name = request.POST.get("name", "").strip()
         if year_name and department and class_name:
             try:
                 year_name = normalize_school_year(year_name)
-                grade = grade_for(department, year_name)
+                grade = normalize_grade(grade_name, "初中部" if department == "middle" else "高中部") if grade_name else grade_for(department, year_name)
             except ValidationError as exc:
                 messages.error(request, str(exc))
             else:
                 year, _ = SchoolYear.objects.get_or_create(name=year_name, defaults={"is_active": True})
                 ClassGroup.objects.get_or_create(department=department, school_year=year, grade=grade, name=class_name, defaults={"is_active": True})
-                messages.success(request, "班级范围已保存。年级已根据学部和学年自动确定为" + grade + "。")
+                messages.success(request, "班级范围已保存，年级为" + grade + "。")
             return redirect("admin-classes")
     return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all(), "collection_scope": AppSetting.get_value("collection_scope", "all")})
 
