@@ -16,20 +16,15 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 
+import portalocker
 from django.conf import settings
 from .models import AppSetting
-
-try:  # pragma: no cover - exercised in the Linux Docker image
-    import fcntl
-except ImportError:  # pragma: no cover - Windows development fallback
-    fcntl = None
 
 
 class MaintenanceError(RuntimeError):
     """Raised when collection writes are closed for maintenance."""
 
 
-_fallback_lock = threading.RLock()
 _local = threading.local()
 
 
@@ -72,20 +67,17 @@ def _file_lock(*, exclusive: bool):
         return
     path = _lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
-        _local.depth = 1
-        try:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-            else:
-                _fallback_lock.acquire()
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            else:
-                _fallback_lock.release()
-            _local.depth = 0
+    flags = (portalocker.LOCK_EX if exclusive else portalocker.LOCK_SH) | portalocker.LOCK_NB
+    timeout = int(getattr(settings, "COLLECTION_MAINTENANCE_LOCK_TIMEOUT_SECONDS", 30))
+    try:
+        with portalocker.Lock(str(path), mode="a+b", flags=flags, timeout=timeout):
+            _local.depth = 1
+            try:
+                yield
+            finally:
+                _local.depth = 0
+    except portalocker.exceptions.LockException as exc:
+        raise MaintenanceError("维护锁正在被其他进程占用，请稍后重试") from exc
 
 
 @contextmanager
