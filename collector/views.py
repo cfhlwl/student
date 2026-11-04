@@ -211,7 +211,22 @@ def submit_result(request, submission_id):
     if not token or hashlib.sha256(token.encode()).hexdigest() != submission.access_token_hash:
         raise Http404
     supplements = submission.photo_supplements.prefetch_related("photos").all()
-    return render(request, "collector/submit_result.html", {"submission": submission, "students": submission.students.all(), "supplements": supplements})
+    students = list(submission.students.all())
+    missing_count = sum(student.match_status == "missing" for student in students)
+    ambiguous_count = sum(student.match_status == "ambiguous" for student in students)
+    photo_collection_complete = bool(students) and missing_count == 0 and ambiguous_count == 0
+    return render(
+        request,
+        "collector/submit_result.html",
+        {
+            "submission": submission,
+            "students": students,
+            "supplements": supplements,
+            "photo_collection_complete": photo_collection_complete,
+            "photo_missing_count": missing_count,
+            "photo_ambiguous_count": ambiguous_count,
+        },
+    )
 
 
 @require_POST

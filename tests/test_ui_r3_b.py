@@ -8,6 +8,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.urls import reverse
 from openpyxl import Workbook
+from PIL import Image
 
 from collector.models import PhotoSupplement, SupplementPhoto
 from collector.services import create_submission
@@ -30,7 +31,9 @@ def roster_upload(name="界面测试名单.xlsx"):
 def _submission(*, photos=False):
     uploads = []
     if photos:
-        uploads.append(SimpleUploadedFile("界面同学.jpg", b"fake-image", content_type="image/jpeg"))
+        image = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(image, format="JPEG")
+        uploads.append(SimpleUploadedFile("界面同学.jpg", image.getvalue(), content_type="image/jpeg"))
     return create_submission(roster_upload=roster_upload(), photo_uploads=uploads, document_uploads=[])
 
 
@@ -72,6 +75,23 @@ def test_result_page_exposes_summary_and_status_filter(settings, tmp_path):
     assert "data-result-filter" in body
     assert "data-match-status" in body
     assert "clipboard.js" in body
+    assert "补传缺失照片" in body
+
+
+@pytest.mark.django_db
+def test_result_page_shows_success_and_hides_supplement_when_all_photos_match(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    submission, token = _submission(photos=True)
+    response = Client().get(
+        reverse("submit-result", args=[submission.id]),
+        {"token": token},
+    )
+
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert "提交成功！" in body
+    assert "照片已全部匹配" in body
+    assert "补传缺失照片" not in body
 
 
 @pytest.mark.django_db
