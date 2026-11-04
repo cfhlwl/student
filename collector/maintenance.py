@@ -90,8 +90,16 @@ def _file_lock(*, exclusive: bool):
 
 @contextmanager
 def collection_write_gate():
-    """Allow one normal collection write while maintenance is open."""
-    with _file_lock(exclusive=False):
+    """Serialize normal collection writes while maintenance is open.
+
+    SQLite permits multiple readers but only one writer.  A shared lock here
+    allowed every Gunicorn worker to enter a long submission transaction at
+    once, so concurrent class submissions could still contend on SQLite's
+    table lock.  Use the same cross-process exclusive lock as maintenance
+    operations to make the single-writer rule explicit while keeping all
+    existing maintenance-state checks in one gate.
+    """
+    with _file_lock(exclusive=True):
         if read_state() != "open":
             raise MaintenanceError("采集资料正在维护或已关闭，请联系管理员开启后重试")
         yield
