@@ -61,7 +61,8 @@ def _approved_students(count=125):
 
 
 @pytest.mark.django_db
-def test_admin_students_pagination_sizes_filters_and_photo_query_budget(client):
+def test_admin_students_pagination_sizes_filters_and_photo_query_budget(settings, tmp_path, client):
+    settings.MEDIA_ROOT = tmp_path / "pagination-media"
     _approved_students()
     admin = User.objects.create_user(username="pagination-admin", password="strong-password-123", is_staff=True)
     client.force_login(admin)
@@ -129,4 +130,3 @@ def test_export_all_paged_dataset_keeps_all_rows_photos_and_numeric_summary(sett
             assert all(isinstance(summary[f"B{row}"].value, (int, float)) for row in range(2, 10))
         assert detail_rows == 125
         assert summary_photo_count == len(expected_payloads)
-

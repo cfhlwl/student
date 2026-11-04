@@ -559,4 +559,3 @@ def admin_classes(request):
             return redirect("admin-classes")
     return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all(), "collection_scope": AppSetting.get_value("collection_scope", "all")})
 
-
