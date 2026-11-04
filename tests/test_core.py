@@ -149,6 +149,36 @@ def test_export_zip_without_filters_returns_zip(client):
 
 
 @pytest.mark.django_db
+def test_admin_students_paginates_and_groups_by_class(client):
+    rows = [[f"学生{i:03d}", "男" if i % 2 else "女", "高中部", "2026", "1", "走读", ""] for i in range(51)]
+    submission, _ = create_submission(roster_upload=excel_upload(rows), photo_uploads=[], document_uploads=[])
+    submission.status = "approved"
+    submission.save(update_fields=["status"])
+    admin = User.objects.create_user(username="students-page-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+
+    first = client.get(reverse("admin-students"), {"page_size": "50"})
+    assert first.status_code == 200
+    assert first.context["student_page"].paginator.count == 51
+    assert first.context["student_page"].number == 1
+    assert len(first.context["student_page"].object_list) == 50
+    assert len(first.context["student_groups"]) == 1
+    assert "高中部 / 2026 / 高一 / 1" in first.content.decode()
+    assert "第 1 / 2 页" in first.content.decode()
+    assert "每页显示" in first.content.decode()
+
+    second = client.get(reverse("admin-students"), {"page_size": "50", "page": "2"})
+    assert second.status_code == 200
+    assert second.context["student_page"].number == 2
+    assert len(second.context["student_page"].object_list) == 1
+    assert "page_size=50" in second.content.decode()
+
+    large_page = client.get(reverse("admin-students"), {"page_size": "200"})
+    assert large_page.status_code == 200
+    assert len(large_page.context["student_page"].object_list) == 51
+
+
+@pytest.mark.django_db
 def test_upload_gate_closes_public_entry(client):
     AppSetting.set_value("public_upload_open", False)
     response = client.get(reverse("submit"))

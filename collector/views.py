@@ -8,6 +8,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.views import LoginView, LogoutView
 from django.contrib.auth.decorators import user_passes_test
+from django.core.paginator import Paginator
 from django.db import IntegrityError
 from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
@@ -366,6 +367,9 @@ def filter_values(form):
     return {f"{key if key != 'school_year' else 'school_year__name'}": value for key, value in form.cleaned_data.items() if value and key != "has_photo"}
 
 
+ADMIN_STUDENT_PAGE_SIZES = (50, 100, 200)
+
+
 @staff_required
 def admin_students(request):
     form = ExportFilterForm(request.GET or None)
@@ -376,7 +380,44 @@ def admin_students(request):
         qs = qs.filter(**filters)
         if form.cleaned_data.get("has_photo") == "yes": qs = qs.filter(match_status="matched")
         if form.cleaned_data.get("has_photo") == "no": qs = qs.exclude(match_status="matched")
-    return render(request, "collector/admin_students.html", {"students": qs, "form": form, "filters_json": json.dumps(filters, ensure_ascii=False), "unmatched_photos": StudentPhoto.objects.filter(student__isnull=True, submission__status__in=["pending", "approved"]).select_related("submission")})
+    try:
+        page_size = int(request.GET.get("page_size", ADMIN_STUDENT_PAGE_SIZES[0]))
+    except (TypeError, ValueError):
+        page_size = ADMIN_STUDENT_PAGE_SIZES[0]
+    if page_size not in ADMIN_STUDENT_PAGE_SIZES:
+        page_size = ADMIN_STUDENT_PAGE_SIZES[0]
+
+    # Keep the ordering stable so that records do not jump between pages while
+    # the administrator is browsing a fixed result set.
+    qs = qs.order_by("school_year__name", "department", "grade", "class_name", "name", "id")
+    student_page = Paginator(qs, page_size).get_page(request.GET.get("page", 1))
+    student_groups = []
+    for student in student_page.object_list:
+        group_key = (student.school_year.name, student.department, student.grade, student.class_name)
+        if not student_groups or student_groups[-1]["key"] != group_key:
+            student_groups.append({
+                "key": group_key,
+                "label": f"{student.get_department_display()} / {student.school_year.name} / {student.grade} / {student.class_name}",
+                "students": [],
+            })
+        student_groups[-1]["students"].append(student)
+
+    pagination_params = request.GET.copy()
+    pagination_params.pop("page", None)
+    export_params = request.GET.copy()
+    export_params.pop("page", None)
+    export_params.pop("page_size", None)
+    return render(request, "collector/admin_students.html", {
+        "student_page": student_page,
+        "student_groups": student_groups,
+        "page_size": page_size,
+        "page_size_options": ADMIN_STUDENT_PAGE_SIZES,
+        "pagination_query": pagination_params.urlencode(),
+        "export_query": export_params.urlencode(),
+        "form": form,
+        "filters_json": json.dumps(filters, ensure_ascii=False),
+        "unmatched_photos": StudentPhoto.objects.filter(student__isnull=True, submission__status__in=["pending", "approved"]).select_related("submission"),
+    })
 
 
 @require_POST

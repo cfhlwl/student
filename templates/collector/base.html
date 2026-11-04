@@ -6,6 +6,7 @@
   <title>{% block title %}{{ site_name }}{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'css/app.css' %}?v=20261103-9">
   <link rel="stylesheet" href="{% static 'css/overrides.css' %}?v=20261103-9">
+  {% block head_extra %}{% endblock %}
 </head>
 <body>
   <div class="shell">
