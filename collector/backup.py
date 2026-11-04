@@ -229,6 +229,9 @@ def clear_collection_safely(backup_path: str | Path, *, database_path: str | Pat
             counts = {"submissions": Submission.objects.count(), "students": Student.objects.count(), "photos": StudentPhoto.objects.count(), "documents": SubmissionDocument.objects.count(), "rosters": sum(bool(row.roster_file) for row in Submission.objects.all()), "staged_uploads": StagedUpload.objects.count(), "upload_sessions": UploadSession.objects.count(), "supplements": PhotoSupplement.objects.count()}
             Submission.objects.all().delete()
             Student.objects.all().delete()
+            PhotoSupplement.objects.all().delete()
+            UploadSession.objects.all().delete()
+            StagedUpload.objects.all().delete()
             ClassGroup.objects.all().delete()
             SchoolYear.objects.all().delete()
             NamingRule.objects.all().delete()

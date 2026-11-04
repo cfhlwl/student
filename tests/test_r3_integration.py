@@ -3,11 +3,13 @@ import zipfile
 
 import pytest
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from openpyxl import load_workbook
 
 from collector.services import create_submission, export_students
-from collector.models import Submission
+from collector.models import StagedUpload, Submission, UploadBatch, UploadSession
+from collector.backup import clear_collection_safely
 from tests.test_core import excel_upload, image_upload
 
 
@@ -80,3 +82,28 @@ def test_admin_clear_button_requires_confirmation_and_preserves_admin(client, se
     assert not Submission.objects.exists()
     assert User.objects.filter(pk=admin.pk).exists()
     assert list((settings.COLLECTION_BACKUP_DIR).glob("before-clear-*.zip"))
+
+
+@pytest.mark.django_db
+def test_safe_clear_removes_upload_sessions_and_staged_files(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path / "media"
+    session = UploadSession.objects.create(
+        access_token_hash="b" * 64,
+        start_idempotency_key="clear-session-1",
+        roster_file=SimpleUploadedFile("临时名单.xlsx", b"roster"),
+        roster_original_name="临时名单.xlsx",
+    )
+    batch = UploadBatch.objects.create(session=session, kind="photo", sequence=0, digest="c" * 64, count=1)
+    StagedUpload.objects.create(
+        batch=batch,
+        ordinal=0,
+        original_name="临时.jpg",
+        file=SimpleUploadedFile("临时.jpg", b"photo"),
+        content_type="image/jpeg",
+        size=5,
+        sha256="d" * 64,
+    )
+    clear_collection_safely(tmp_path / "backup.zip", media_root=settings.MEDIA_ROOT)
+    assert UploadSession.objects.count() == 0
+    assert UploadBatch.objects.count() == 0
+    assert StagedUpload.objects.count() == 0
