@@ -1,5 +1,6 @@
 import hashlib
 import io
+from pathlib import Path
 
 import pytest
 from django.contrib.auth.models import User
@@ -111,6 +112,14 @@ def test_r3_status_endpoint_uses_post_body_and_no_store(settings, tmp_path):
     assert status["Cache-Control"].startswith("no-store")
     assert status["Pragma"] == "no-cache"
     assert client.get(reverse("upload-status", args=[state["upload_id"]]) + "?upload_token=" + state["upload_token"]).status_code == 405
+
+
+def test_r3_f5_nonce_requires_crypto_random_values():
+    source = (Path(__file__).resolve().parents[1] / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "getRandomValues" in source
+    assert "Math.random" not in source
+    assert "不支持安全随机数" in source
+    assert "idempotencyKey: randomNonce()" in source
 
 
 @pytest.mark.django_db

@@ -1,3 +1,13 @@
+function randomNonce() {
+  const secureCrypto = window.crypto;
+  if (!secureCrypto || typeof secureCrypto.getRandomValues !== 'function') {
+    throw new Error('当前浏览器不支持安全随机数，无法创建上传会话，请升级浏览器后重试。');
+  }
+  const bytes = new Uint8Array(32);
+  secureCrypto.getRandomValues(bytes);
+  return Array.from(bytes).map(function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('input[type=file]').forEach(function (input) {
     input.addEventListener('change', function () {
@@ -60,15 +70,6 @@ document.addEventListener('DOMContentLoaded', function () {
         return Array.from(new Uint8Array(digest)).map(function (value) { return value.toString(16).padStart(2, '0'); }).join('');
       }
       return sha256Pure(buffer);
-    }
-    function randomNonce() {
-      const bytes = new Uint8Array(32);
-      if (window.crypto && window.crypto.getRandomValues) {
-        window.crypto.getRandomValues(bytes);
-      } else {
-        for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256);
-      }
-      return Array.from(bytes).map(function (value) { return value.toString(16).padStart(2, '0'); }).join('');
     }
     async function buildPhotoManifest(files) {
       const manifest = [];

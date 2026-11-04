@@ -16,6 +16,7 @@
 - 提交结果页支持凭提交编号和私有凭证补传缺失照片；补传先进入待审核版本，同名不随机匹配，管理员采用后才写入有效照片。
 - 补传人工绑定使用事务锁和数据库部分唯一约束，同一补传不能把两张照片绑定到同一学生，支持解除/纠正绑定；审核前再次校验学生归属、已有照片和当前有效提交版本。
 - 原提交被新版本替代时，旧补传安全标记为“原提交已失效”并保留文件与审计记录，最终导出只读取当前有效采用版本。
+- F5：`randomNonce()` 仅使用 `window.crypto.getRandomValues()`；不支持安全随机数时抛出清晰错误，错误发生在持久化会话和 `/start/` 请求之前，不创建上传会话。
 - 保留管理员清空全部采集资料功能。
 
 ## RED → GREEN
@@ -28,12 +29,14 @@
 6. F2：旧 GET 状态查询被拒绝（405）；POST 状态查询带 `no-store`/`no-cache`，真实 Nginx 日志未出现令牌查询参数（GREEN）。
 7. F3：同一补传重复绑定先以唯一约束/事务校验拒绝，人工绑定可解除后重新选择；重复审核返回业务错误而不是 500（GREEN）。
 8. F4：原提交审核后被同班新版本替代，旧补传采用请求被标记 `expired`，不产生旧版本照片（GREEN）。
+9. F5：原实现缺少安全随机 API 时回退 `Math.random()`（RED）；移除回退，安全 API 正常时产生不同 nonce，不支持时抛错且不发起 `/start/`（GREEN）。
 
 ## 测试退出码
 
 | 验证 | 结果 | 退出码 |
 |---|---:|---:|
-| `pytest -q`（完整本地回归） | 63 passed | 0 |
+| `pytest -q`（完整本地回归） | 64 passed | 0 |
+| `node tests/f5_nonce_test.js` | `F5_NONCE_OK secure_calls=2 distinct=1 unsupported=throws` | 0 |
 | `python manage.py check` | 无问题 | 0 |
 | `python manage.py makemigrations --check --dry-run` | No changes detected | 0 |
 | `pytest`：50/100/300 参数化、10 班并发、同班审核竞争、R2 并发隔离 | 6 passed | 0 |
@@ -46,18 +49,19 @@
 | Docker + Nginx：缺失照片补传、管理员审核、ZIP | 通过；4→5 张，pending→approved | 0 |
 | Docker + Nginx：300 张按最多 20 张/批上传 | 通过；15 批、DB 300、ZIP 300、CRC/哈希/分类 | 0 |
 | Playwright 真实浏览器：21 张照片、临时失败重试、刷新后重选恢复 | 通过；选择数 21，结果页 21 名学生/21 张照片 | 0 |
+| Playwright F5：禁用 `getRandomValues` | 页面显示安全随机数错误；`/submit/upload/start/` 请求数为 0 | 0 |
 | Nginx 访问日志令牌检查 | `upload_token` 查询参数不存在 | 0 |
 
 关键实测输出：
 
 - `HTTP_R2_FINAL_OK mixed=15+20MB-doc concurrent_classes=10 concurrent_photos=200 total_photos=215 zip_bytes=50687703`
 - `HTTP_R3_50_LARGE_OK photos=50 batches=5 zip_bytes=167571325 elapsed_seconds=20.41`
-- `HTTP_R2_100X3_OK photos=100 batches=12 db_photos=100 media_photo_files=100 zip_photos=100 zip_bytes=335109949 elapsed_seconds=45.47 client_maxrss_kb=871200 media_bytes=339126137`
+- `HTTP_R2_100X3_OK photos=100 batches=12 db_photos=100 media_photo_files=100 zip_photos=100 zip_bytes=335109949 elapsed_seconds=46.04 client_maxrss_kb=871240 media_bytes=339126137`
 - `HTTP_R3_300_BATCH_OK photos=300 batches=15 db_photos=300 zip_photos=300 zip_bytes=226042`
-- `HTTP_R3_SUPPLEMENT_OK submission=40165cfa-04c0-401b-899f-9738dc139c54 pending_to_approved=1 photos=5 zip_bytes=26216`
+- `HTTP_R3_SUPPLEMENT_OK submission=a297579d-fdfd-498e-8f03-ce6c917cf9fd pending_to_approved=1 photos=5 zip_bytes=26219`
 - `NGINX_UPLOAD_TOKEN_QUERY_ABSENT NGINX_LOG_LINES=39`
 
-浏览器快照确认 Excel 显示“已选择：r3a-browser.xlsx”、照片显示“已选择 21 个文件”；注入一次临时 503 后自动重试，刷新页面并重新选择同一组文件后继续未完成批次，最终结果页显示 21 名学生均已匹配；服务端核对 `students=21, photos=21, staged=21`。
+浏览器快照确认 Excel 显示“已选择：r3a-browser.xlsx”、照片显示“已选择 21 个文件”；注入一次临时 503 后自动重试，刷新页面并重新选择同一组文件后继续未完成批次，最终结果页显示 21 名学生均已匹配。F5 模拟无安全随机 API 时显示“当前浏览器不支持安全随机数，无法创建上传会话，请升级浏览器后重试。”，Nginx 日志中没有 `/submit/upload/start/` 请求。
 
 ## 未完成 / 约束
 
