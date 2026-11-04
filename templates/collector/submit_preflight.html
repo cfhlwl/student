@@ -1,0 +1,50 @@
+{% extends 'collector/base.html' %}
+{% load static %}
+{% block title %}上传前资料预检查 · {{ site_name }}{% endblock %}
+{% block topbar_right %}{% endblock %}
+{% block content %}
+<main class="public-page" aria-label="上传前资料预检查">
+  <section class="submit-card preflight-card" id="preflight-app" data-preflight-endpoint="{{ preflight_endpoint|default:'' }}">
+    <div class="card-heading">
+      <div><span class="kicker">提交前检查</span><h1>核对名单和照片</h1></div>
+      <span class="field-help">预检查不会创建上传会话，最终提交仍由服务器再次校验。</span>
+    </div>
+    <form id="preflight-form" enctype="multipart/form-data" novalidate>
+      {% csrf_token %}
+      <div class="form-grid">
+        <label class="upload-field wide">
+          <span class="field-title">Excel 学生名单 <i>必填</i></span>
+          <input type="file" name="roster" accept=".xlsx" required>
+          <span class="file-hint">选择 .xlsx 文件</span>
+          <span class="file-count" data-file-count="roster" aria-live="polite"></span>
+        </label>
+        <label class="upload-field wide">
+          <span class="field-title">学生照片 <i class="soft">可选</i></span>
+          <input type="file" name="photos" accept=".jpg,.jpeg,.png" multiple>
+          <span class="file-hint">可一次选择多张 JPG / PNG</span>
+          <span class="file-count" data-file-count="photos" aria-live="polite"></span>
+        </label>
+      </div>
+      <div class="submit-bar">
+        <span>同名学生或无法按姓名确定的照片不会被随机匹配。</span>
+        <button class="button primary" type="submit">开始预检查 <span>→</span></button>
+      </div>
+    </form>
+    <section id="preflight-result" class="preflight-result" hidden aria-live="polite">
+      <div class="preflight-summary" role="status">
+        <div><strong data-summary="student_count">0</strong><span>学生</span></div>
+        <div><strong data-summary="photo_count">0</strong><span>照片</span></div>
+        <div><strong data-summary="matched_count">0</strong><span>已匹配</span></div>
+        <div><strong data-summary="missing_count">0</strong><span>缺照片</span></div>
+        <div><strong data-summary="manual_count">0</strong><span>待人工确认</span></div>
+      </div>
+      <div class="preflight-issues">
+        <section class="error-box" data-issues="blocking_errors" hidden><h2>阻断错误</h2><ul></ul></section>
+        <section class="warning-box" data-issues="warnings" hidden><h2>普通警告</h2><ul></ul><label><input type="checkbox" data-warning-ack> 我已核对警告，仍继续提交</label></section>
+      </div>
+      <button class="button primary" type="button" data-preflight-continue disabled>继续提交</button>
+    </section>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}<script src="{% static 'js/preflight.js' %}?v=20261104-1"></script>{% endblock %}
