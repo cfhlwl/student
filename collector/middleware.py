@@ -1,8 +1,45 @@
 import time
 
 from django.db.utils import OperationalError
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from .models import AppSetting
+from .security_controls import classify_rate_limit, client_ip_from_meta, consume_rate_limit
+
+
+class TrustedProxyMiddleware:
+    """Interpret forwarding headers only from configured reverse proxies."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        peer = request.META.get("REMOTE_ADDR", "")
+        resolved = client_ip_from_meta(request.META)
+        if resolved != peer:
+            request.META["REMOTE_ADDR"] = resolved
+        else:
+            request.META.pop("HTTP_X_FORWARDED_FOR", None)
+            request.META.pop("HTTP_X_REAL_IP", None)
+            request.META.pop("HTTP_X_FORWARDED_PROTO", None)
+        return self.get_response(request)
+
+
+class CollectionRateLimitMiddleware:
+    """Rate-limit public collection endpoints using a shared file cache."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        name = classify_rate_limit(request.path_info, request.method)
+        if name:
+            allowed, retry_after = consume_rate_limit(name=name, client_ip=client_ip_from_meta(request.META))
+            if not allowed:
+                response = JsonResponse({"error": "请求过于频繁，请稍后重试。", "retry_after": retry_after}, status=429)
+                response["Retry-After"] = str(retry_after)
+                response["Cache-Control"] = "no-store"
+                return response
+        return self.get_response(request)
 
 
 class UploadGateMiddleware:
