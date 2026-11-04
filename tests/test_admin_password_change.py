@@ -126,7 +126,13 @@ def test_password_change_is_csrf_protected():
     assert admin.check_password(OLD_PASSWORD)
 
     token = client.cookies["csrftoken"].value
-    response = client.post(url, _password_data(), HTTP_X_CSRFTOKEN=token, secure=True)
+    response = client.post(
+        url,
+        _password_data(),
+        HTTP_X_CSRFTOKEN=token,
+        HTTP_REFERER=f"https://testserver{url}",
+        secure=True,
+    )
     assert response.status_code == 302
     admin.refresh_from_db()
     assert admin.check_password(NEW_PASSWORD)
