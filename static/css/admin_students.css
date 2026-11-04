@@ -1,0 +1,8 @@
+.student-group-row th{padding:12px;background:#f2f4f8;color:var(--ink);font-size:12px;letter-spacing:.04em;border-top:1px solid var(--line)}
+.student-group-row th span{float:right;color:var(--muted);font-size:11px;font-weight:400;letter-spacing:0}
+.pagination{display:flex;justify-content:center;align-items:center;gap:14px;margin-top:20px;padding-top:18px;border-top:1px solid var(--line);font-size:13px}
+.pagination a{padding:8px 12px;border:1px solid var(--line);border-radius:8px;color:var(--orange-dark);text-decoration:none;background:#fff}
+.pagination a:hover,.pagination a:focus-visible{border-color:var(--orange);background:#fff7f1;outline:0}
+.pagination span{color:var(--muted)}
+@media(max-width:760px){.student-group-row th span{float:none;display:block;margin-top:3px}.pagination{justify-content:space-between}}
+
