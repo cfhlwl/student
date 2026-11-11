@@ -10,12 +10,14 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 from openpyxl import load_workbook
 from PIL import Image, UnidentifiedImageError
+
+from .photo_quality import assess_photo_quality, quality_issue_level
 
 
 DEPARTMENTS = {"初中部", "高中部"}
@@ -95,6 +97,10 @@ class PreflightPhoto:
     size: int
     sha256: str = ""
     status: str = "invalid"
+    quality_status: str = "not_checked"
+    quality_code: str = ""
+    quality_message: str = ""
+    quality: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -132,8 +138,13 @@ class PreflightResult:
         return bool(self.blocking_errors)
 
     def as_dict(self) -> dict[str, Any]:
+        summary = {
+            **self.summary,
+            "quality_failed_count": sum(photo.quality_status == "failed" for photo in self.photos),
+            "quality_passed_count": sum(photo.quality_status == "passed" for photo in self.photos),
+        }
         return {
-            "summary": self.summary,
+            "summary": summary,
             "records": [record.__dict__ for record in self.records],
             "photos": [photo.__dict__ for photo in self.photos],
             "blocking_errors": [issue.as_dict() for issue in self.blocking_errors],
@@ -332,11 +343,30 @@ def _read_photos(uploads: Iterable[Any], result: PreflightResult, limits: Prefli
             _rewind(upload)
             digest = _sha256(upload)
             status = "valid"
+            quality = assess_photo_quality(upload)
+            if quality.status != "passed":
+                _add_issue(
+                    result,
+                    code=quality.code,
+                    message=f"照片 {filename}：{quality.message}",
+                    level=quality_issue_level(quality),
+                    filename=filename,
+                )
         except (UnidentifiedImageError, OSError, ValueError, EOFError):
             _add_issue(result, code="invalid_photo", message=f"照片 {filename} 损坏或无法读取", level="error", filename=filename)
+            quality = None
         finally:
             _rewind(upload)
-        checked.append(PreflightPhoto(filename=filename, size=size, sha256=digest, status=status))
+        checked.append(PreflightPhoto(
+            filename=filename,
+            size=size,
+            sha256=digest,
+            status=status,
+            quality_status=quality.status if quality else "not_checked",
+            quality_code=quality.code if quality else "",
+            quality_message=quality.message if quality else "",
+            quality=quality.as_dict() if quality else {},
+        ))
     if total_size > limits.max_total_photo_bytes:
         _add_issue(result, code="photo_total_too_large", message="照片总上传体积超过限制", level="error")
     return checked
@@ -351,12 +381,12 @@ def _resolve_photo_matches(result: PreflightResult) -> None:
             continue
         candidates = by_name.get(_photo_stem(photo.filename), [])
         if len(candidates) == 1:
-            result.photos[index] = PreflightPhoto(photo.filename, photo.size, photo.sha256, "matched")
+            result.photos[index] = replace(photo, status="matched")
         elif len(candidates) > 1:
-            result.photos[index] = PreflightPhoto(photo.filename, photo.size, photo.sha256, "manual")
+            result.photos[index] = replace(photo, status="manual")
             _add_issue(result, code="same_name_photo", message=f"照片 {photo.filename} 对应多个同名学生，需人工确认", level="warning", filename=photo.filename)
         else:
-            result.photos[index] = PreflightPhoto(photo.filename, photo.size, photo.sha256, "manual")
+            result.photos[index] = replace(photo, status="manual")
             _add_issue(result, code="unmatched_photo", message=f"照片 {photo.filename} 无法按姓名匹配学生，需人工确认", level="warning", filename=photo.filename)
 
 

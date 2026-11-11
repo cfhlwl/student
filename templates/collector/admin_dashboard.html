@@ -5,6 +5,7 @@
   <div><div class="eyebrow">采集总览 / 现在</div><h1>资料采集进度</h1></div>
   <div class="heading-actions">
     <form method="post" action="{% url 'toggle-upload' %}">{% csrf_token %}<button class="button {% if upload_open %}danger{% else %}primary{% endif %}" type="submit">{% if upload_open %}关闭公开上传{% else %}开启公开上传{% endif %}</button></form>
+    <form method="post" action="{% url 'toggle-photo-quality' %}">{% csrf_token %}<button class="button {% if photo_quality_blocking %}danger{% else %}ghost{% endif %}" type="submit">人脸质量拦截：{% if photo_quality_blocking %}已开启{% else %}未开启{% endif %}</button></form>
     <form method="post" action="{% url 'clear-test-data' %}" onsubmit="return confirm('此操作将先备份，再清空所有提交、学生、照片、文档、学年班级配置、命名设置和采集日志，仅保留管理员账号。确定继续吗？');">{% csrf_token %}<input type="hidden" name="confirm_clear" value="YES"><label class="danger-confirm">当前管理员密码 <input type="password" name="admin_password" autocomplete="current-password" required></label><button class="button ghost" type="submit">清空全部采集数据</button></form>
   </div>
 </div>

@@ -50,7 +50,7 @@ def test_preflight_reports_match_missing_and_same_name_manual_warning():
         "manual_count": 1,
     }
     assert not result.blocking_errors
-    assert {issue.code for issue in result.warnings} == {"same_name_student", "unmatched_photo"}
+    assert {issue.code for issue in result.warnings} == {"same_name_student", "unmatched_photo", "no_face"}
     assert not result.can_continue()
     assert result.can_continue(warnings_acknowledged=True)
 

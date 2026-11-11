@@ -28,6 +28,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
+from .photo_quality import assess_photo_quality, face_quality_blocking_enabled
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
@@ -354,6 +355,10 @@ def _prepare_photos(photo_uploads):
     total_size = 0
     for upload in photo_uploads:
         content_type, sha256 = image_bytes_info(upload)
+        if face_quality_blocking_enabled():
+            quality = assess_photo_quality(upload)
+            if not quality.passed:
+                raise ValidationError(f"照片 {upload.name} 未通过人脸质量检查：{quality.message}")
         prepared.append(PreparedUpload(upload.name, _safe_upload_name(upload), content_type, upload.size, sha256, source=upload))
         total_size += upload.size
     if total_size > settings.MAX_BATCH_UPLOAD_SIZE_MB * 1024 * 1024:
@@ -1116,6 +1121,12 @@ def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_f
             raise ValidationError(f"照片尚未全部上传，已收到 {len(photo_rows)} 张，应为 {session.expected_photo_count} 张")
         if len(document_rows) != session.expected_document_count:
             raise ValidationError("相关文档尚未全部上传")
+        if face_quality_blocking_enabled():
+            for row in photo_rows:
+                with default_storage.open(row.file.name, "rb") as photo_source:
+                    quality = assess_photo_quality(photo_source)
+                if not quality.passed:
+                    raise ValidationError(f"照片 {row.original_name} 未通过人脸质量检查：{quality.message}")
         photo_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in photo_rows]
         document_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in document_rows]
         roster_candidate = PreparedUpload(session.roster_original_name, session.roster_original_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 0, "", stored_name=roster_path)

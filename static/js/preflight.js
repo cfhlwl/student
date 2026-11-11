@@ -63,7 +63,7 @@
       batches.push(photos.slice(index, end)); index = end;
     }
     if (!batches.length) batches.push([]);
-    var aggregate = {summary: {student_count: 0, photo_count: 0, matched_count: 0, missing_count: 0, manual_count: 0}, records: [], photos: [], blocking_errors: [], warnings: []};
+    var aggregate = {summary: {student_count: 0, photo_count: 0, matched_count: 0, missing_count: 0, manual_count: 0, quality_failed_count: 0, quality_passed_count: 0}, records: [], photos: [], blocking_errors: [], warnings: []};
     for (var batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
       var body = new FormData(); body.append('roster', roster, roster.name);
       batches[batchIndex].forEach(function (file) { body.append('photos', file, file.name); });
@@ -80,6 +80,8 @@
     aggregate.summary.manual_count = aggregate.photos.filter(function (photo) { return photo.status === 'manual'; }).length;
     var matchedNames = aggregate.photos.filter(function (photo) { return photo.status === 'matched'; }).map(function (photo) { return photo.filename.replace(/\.[^.]+$/, '').trim().toLocaleLowerCase(); });
     aggregate.summary.missing_count = aggregate.records.filter(function (record) { return matchedNames.indexOf(String(record.name || '').trim().toLocaleLowerCase()) < 0; }).length;
+    aggregate.summary.quality_failed_count = aggregate.photos.filter(function (photo) { return photo.quality_status === 'failed'; }).length;
+    aggregate.summary.quality_passed_count = aggregate.photos.filter(function (photo) { return photo.quality_status === 'passed'; }).length;
     return aggregate;
   }
 
