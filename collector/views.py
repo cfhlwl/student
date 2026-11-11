@@ -9,7 +9,7 @@ from django.contrib import messages
 from django.contrib.auth.views import LoginView, LogoutView
 from django.contrib.auth.decorators import user_passes_test
 from django.core.paginator import Paginator
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -21,6 +21,7 @@ from .backup import BackupError, clear_collection_safely
 from .maintenance import MaintenanceError, collection_maintenance_gate, collection_write_gate, public_upload_is_open, read_state, write_state
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
+from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, read_face_quality_policy
 from .preflight import run_preflight
 from .services import ValidationError, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 from .statistics import build_admin_statistics_context, build_exception_workbook
@@ -284,6 +285,7 @@ def admin_dashboard(request):
         "missing_count": students.exclude(match_status="matched").count(), "pending_count": Submission.objects.filter(status="pending").count(),
         "rejected_count": Submission.objects.filter(status="rejected").count(),
         "class_stats": class_stats, "upload_open": public_upload_is_open(),
+        "photo_quality_blocking": face_quality_blocking_enabled(),
     }
     return render(request, "collector/admin_dashboard.html", context)
 
@@ -314,6 +316,28 @@ def admin_submissions(request):
     if request.GET.get("status"): submissions = submissions.filter(status=request.GET["status"])
     supplements = PhotoSupplement.objects.filter(status="pending").select_related("submission", "submission__class_group").prefetch_related("photos", "photos__student")
     return render(request, "collector/admin_submissions.html", {"submissions": submissions, "supplements": supplements})
+
+
+@staff_required
+def submission_preview(request, submission_id):
+    submission = get_object_or_404(
+        Submission.objects.select_related("class_group", "school_year", "reviewed_by"),
+        id=submission_id,
+    )
+    students = list(submission.students.select_related("photo").order_by("class_name", "name", "id"))
+    photos = list(submission.photos.select_related("student").order_by("original_name", "id"))
+    documents = list(submission.documents.all().order_by("original_name", "id"))
+    return render(request, "collector/admin_submission_preview.html", {
+        "submission": submission,
+        "students": students,
+        "photos": photos,
+        "documents": documents,
+        "student_count": len(students),
+        "photo_count": len(photos),
+        "matched_count": sum(student.match_status == "matched" for student in students),
+        "missing_count": sum(student.match_status == "missing" for student in students),
+        "ambiguous_count": sum(student.match_status == "ambiguous" for student in students),
+    })
 
 
 @require_POST
@@ -519,6 +543,32 @@ def toggle_upload(request):
         messages.error(request, str(exc))
         return redirect("admin-dashboard")
     messages.success(request, "公开上传已" + ("开启" if opening else "关闭") + "。")
+    return redirect("admin-dashboard")
+
+
+@require_POST
+@staff_required
+def toggle_photo_quality(request):
+    try:
+        with collection_maintenance_gate() as previous_state:
+            if previous_state == "clearing":
+                raise MaintenanceError("资料正在清空或恢复，请稍后再试")
+            with transaction.atomic():
+                enabled = not read_face_quality_policy().enabled
+                AppSetting.set_value("photo_face_quality_blocking", enabled)
+                AuditLog.objects.create(
+                    actor=request.user,
+                    action="toggle_photo_face_quality_blocking",
+                    detail={"enabled": enabled},
+                    ip_address=client_ip(request),
+                )
+    except (MaintenanceError, PhotoQualityPolicyError) as exc:
+        messages.error(request, str(exc))
+        return redirect("admin-dashboard")
+    except Exception:
+        messages.error(request, "不合格照片拦截设置未保存，审计记录也未写入，请稍后重试。")
+        return redirect("admin-dashboard")
+    messages.success(request, "不合格照片拦截已" + ("开启" if enabled else "关闭") + "。")
     return redirect("admin-dashboard")
 
 

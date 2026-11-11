@@ -152,6 +152,32 @@ def test_admin_review_page_exposes_pre_review_summary_and_safe_clear_action(sett
     assert "清空全部采集数据" in dashboard_body
 
 
+@pytest.mark.django_db
+def test_submission_preview_shows_counts_and_photos_without_changing_status(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    submission, _ = _submission(photos=True)
+    admin = User.objects.create_user(
+        username="preview-admin",
+        password="preview-admin-password-strong",
+        is_staff=True,
+    )
+    client = Client()
+    assert client.login(username=admin.username, password="preview-admin-password-strong")
+
+    response = client.get(reverse("submission-preview", args=[submission.id]))
+
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert "审核前只读预览" in body
+    assert "学生人数" in body
+    assert "照片数量" in body
+    assert "逐张核对" in body
+    assert "确认采用" in body
+    assert reverse("protected-photo", args=[submission.photos.get().id]) in body
+    submission.refresh_from_db()
+    assert submission.status == "pending"
+
+
 def test_ui_clipboard_and_filter_script_contract():
     source = open("static/js/clipboard.js", encoding="utf-8").read()
     assert "navigator.clipboard.writeText" in source
