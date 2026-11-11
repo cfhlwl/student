@@ -1,4 +1,5 @@
 import io
+import hashlib
 from contextlib import contextmanager
 
 import numpy as np
@@ -7,6 +8,7 @@ from django.contrib.auth.models import User
 from django.db import OperationalError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from openpyxl import Workbook
 from PIL import Image
 
 from collector import photo_quality, services
@@ -94,6 +96,15 @@ def test_detection_failure_and_model_unavailable_are_not_quality_failures(monkey
     assert unavailable.code == "opencv_unavailable"
 
 
+def test_detection_budget_is_checked_after_eye_detection(monkeypatch):
+    fake_models(monkeypatch)
+    monkeypatch.setattr(photo_quality, "DETECTION_BUDGET_SECONDS", 0.0)
+    result = photo_quality.assess_photo_quality(image_upload())
+    assert result.status == "detection_error"
+    assert result.code == "detection_budget_exceeded"
+    assert result.timeout_mode == "best_effort"
+
+
 @pytest.mark.django_db
 def test_policy_defaults_off_and_database_failure_does_not_fail_open(monkeypatch):
     AppSetting.objects.filter(key="photo_face_quality_blocking").delete()
@@ -157,3 +168,49 @@ def test_quality_detection_runs_before_collection_write_gate(monkeypatch):
     prepared = services.PreparedUpload("synthetic.jpg", "synthetic.jpg", "image/jpeg", 1, "sha", source=io.BytesIO(b"x"))
     assert services._validate_photo_quality([prepared])
     assert state["checked_outside"] is True
+
+
+@pytest.mark.django_db
+def test_finalize_hashes_each_staged_photo_once(settings, tmp_path, monkeypatch):
+    settings.MEDIA_ROOT = tmp_path
+    AppSetting.set_value("photo_face_quality_blocking", True)
+
+    roster_book = Workbook()
+    roster_sheet = roster_book.active
+    roster_sheet.append(["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型"])
+    roster_sheet.append(["锁内校验", "男", "高中部", "2026", "高一", "P1", "走读"])
+    roster_bytes = io.BytesIO()
+    roster_book.save(roster_bytes)
+    roster = SimpleUploadedFile("名单.xlsx", roster_bytes.getvalue())
+    photo = image_upload()
+    photo_bytes = photo.read()
+    photo.seek(0)
+    manifest = [{"name": photo.name, "size": len(photo_bytes), "sha256": hashlib.sha256(photo_bytes).hexdigest()}]
+    session, token, _ = services.start_upload_session(
+        roster_upload=roster,
+        document_uploads=[],
+        expected_photo_count=1,
+        photo_manifest=manifest,
+        roster_fingerprint="synthetic-roster",
+    )
+    services.stage_upload_batch(
+        session.id, "photo", 0, [photo], token=token,
+        manifest_digest=session.photo_manifest_digest,
+        roster_fingerprint="synthetic-roster",
+    )
+    monkeypatch.setattr(services, "assess_photo_quality", lambda upload: PhotoQualityResult("passed", "", "合格"))
+    calls = {"count": 0}
+    original_assert = services._assert_quality_evidence
+
+    def counted_assert(prepared, evidence):
+        calls["count"] += 1
+        return original_assert(prepared, evidence)
+
+    monkeypatch.setattr(services, "_assert_quality_evidence", counted_assert)
+    submission, _ = services.finalize_upload_session(
+        session_id=session.id, token=token,
+        manifest_digest=session.photo_manifest_digest,
+        roster_fingerprint="synthetic-roster",
+    )
+    assert submission.photos.count() == 1
+    assert calls["count"] == 1

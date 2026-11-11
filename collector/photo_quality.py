@@ -7,6 +7,7 @@ face embeddings, identify a person, or send the image to a third party.
 from __future__ import annotations
 
 import time
+import threading
 import tracemalloc
 from dataclasses import dataclass
 from functools import lru_cache
@@ -21,9 +22,15 @@ MIN_BRIGHTNESS = 45.0
 MAX_BRIGHTNESS = 210.0
 MAX_CLIPPED_RATIO = 0.02
 MAX_IMAGE_PIXELS = 24_000_000
+MAX_DECODE_MEMORY_BYTES = 96_000_000
 MAX_DETECTION_DIMENSION = 1600
-MAX_DETECTION_SECONDS = 2.0
+DETECTION_BUDGET_SECONDS = 2.0
+MAX_DETECTION_SECONDS = DETECTION_BUDGET_SECONDS  # backwards-compatible name for callers/tests
+MAX_CONCURRENT_DETECTIONS = 2
+DETECTION_SLOT_WAIT_SECONDS = 5.0
 PHOTO_QUALITY_POLICY_VERSION = "haar-v2-20261111"
+
+_DETECTION_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_DETECTIONS)
 
 
 class PhotoQualityPolicyError(RuntimeError):
@@ -59,6 +66,7 @@ class PhotoQualityResult:
     peak_memory_bytes: int | None = None
     detection_width: int = 0
     detection_height: int = 0
+    timeout_mode: str = "none"
 
     @property
     def passed(self) -> bool:
@@ -76,6 +84,7 @@ class PhotoQualityResult:
             "cpu_time_ms": round(self.cpu_time_ms, 2) if self.cpu_time_ms is not None else None,
             "peak_memory_bytes": self.peak_memory_bytes,
             "detection_width": self.detection_width, "detection_height": self.detection_height,
+            "timeout_mode": self.timeout_mode,
         }
 
 
@@ -105,6 +114,12 @@ def _load_classifiers():
         eyes = cv2.CascadeClassifier(base + "haarcascade_eye_tree_eyeglasses.xml")
         if frontal.empty() or profile.empty() or eyes.empty():
             raise RuntimeError("人脸质量检测模型加载失败")
+        # Haar calls are synchronous C extensions. Keep each application worker
+        # single-threaded so a batch cannot multiply native CPU usage.
+        try:
+            cv2.setNumThreads(1)
+        except AttributeError:
+            pass
         return cv2, frontal, profile, eyes
     except Exception as exc:
         raise PhotoQualityModelUnavailable(f"人脸质量检测模型不可用：{exc}") from exc
@@ -134,7 +149,26 @@ def _result(status: str, code: str, message: str, *, start_wall: float, start_cp
 
 
 def assess_photo_quality(upload: Any, *, min_face_pixels: int = MIN_FACE_PIXELS) -> PhotoQualityResult:
-    """Assess one image with bounded, aspect-preserving OpenCV work."""
+    """Assess one image with bounded input and a process-local concurrency cap.
+
+    OpenCV's synchronous detector cannot be safely cancelled from this process.
+    The time limit below is therefore a measured soft budget, not a hard
+    deadline. Callers receive ``detection_budget_exceeded`` after all currently
+    running detector calls return and must not treat that result as a pass.
+    """
+    if not _DETECTION_SLOTS.acquire(timeout=DETECTION_SLOT_WAIT_SECONDS):
+        _rewind(upload)
+        return PhotoQualityResult(
+            "detection_error", "detection_resource_busy", "人脸质量检测资源繁忙，请稍后重试。",
+        )
+    try:
+        return _assess_photo_quality_unbounded(upload, min_face_pixels=min_face_pixels)
+    finally:
+        _DETECTION_SLOTS.release()
+
+
+def _assess_photo_quality_unbounded(upload: Any, *, min_face_pixels: int = MIN_FACE_PIXELS) -> PhotoQualityResult:
+    """Run one bounded-input detection while holding one local detector slot."""
     start_wall = time.perf_counter()
     start_cpu = time.process_time()
     started_tracing = not tracemalloc.is_tracing()
@@ -153,6 +187,8 @@ def assess_photo_quality(upload: Any, *, min_face_pixels: int = MIN_FACE_PIXELS)
                 return _result("detection_error", "invalid_image_dimensions", "图片尺寸无效。", start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing)
             if source_width * source_height > MAX_IMAGE_PIXELS:
                 return _result("detection_error", "image_pixel_budget", f"图片像素超过检测预算（最多 {MAX_IMAGE_PIXELS:,} 像素）。", width=source_width, height=source_height, start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing)
+            if source_width * source_height * 4 > MAX_DECODE_MEMORY_BYTES:
+                return _result("detection_error", "image_memory_budget", f"图片解码内存预算不足（最多约 {MAX_DECODE_MEMORY_BYTES // (1024 * 1024)} MB）。", width=source_width, height=source_height, start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing)
             image = ImageOps.exif_transpose(source)
             width, height = image.size
             if width <= 0 or height <= 0:
@@ -178,14 +214,18 @@ def assess_photo_quality(upload: Any, *, min_face_pixels: int = MIN_FACE_PIXELS)
             sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         except Exception as exc:
             raise RuntimeError(f"图像检测失败：{exc}") from exc
-        if time.perf_counter() - start_wall > MAX_DETECTION_SECONDS:
-            return _result("detection_error", "detection_timeout", f"人脸质量检测超过 {MAX_DETECTION_SECONDS:.1f} 秒预算。", width=width, height=height, sharpness=sharpness, brightness=brightness, clipped_ratio=clipped_ratio, detection_width=detection_width, detection_height=detection_height, start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing)
         common = dict(width=width, height=height, sharpness=sharpness, brightness=brightness, clipped_ratio=clipped_ratio, detection_width=detection_width, detection_height=detection_height)
         if len(faces) == 0 and len(profile_faces) > 0:
+            if time.perf_counter() - start_wall > DETECTION_BUDGET_SECONDS:
+                return _result("detection_error", "detection_budget_exceeded", f"人脸质量检测超过 {DETECTION_BUDGET_SECONDS:.1f} 秒软预算；当前 OpenCV 调用无法在进程内硬中断。", start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing, timeout_mode="best_effort", **common)
             return _result("failed", "profile_face", "检测到明显侧脸，请重新上传正脸照片。", face_count=1, start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing, **common)
         if len(faces) == 0:
+            if time.perf_counter() - start_wall > DETECTION_BUDGET_SECONDS:
+                return _result("detection_error", "detection_budget_exceeded", f"人脸质量检测超过 {DETECTION_BUDGET_SECONDS:.1f} 秒软预算；当前 OpenCV 调用无法在进程内硬中断。", start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing, timeout_mode="best_effort", **common)
             return _result("failed", "no_face", "未检测到清晰正脸，请重新上传单人正脸照片。", start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing, **common)
         if len(faces) > 1:
+            if time.perf_counter() - start_wall > DETECTION_BUDGET_SECONDS:
+                return _result("detection_error", "detection_budget_exceeded", f"人脸质量检测超过 {DETECTION_BUDGET_SECONDS:.1f} 秒软预算；当前 OpenCV 调用无法在进程内硬中断。", start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing, timeout_mode="best_effort", **common)
             return _result("failed", "multiple_faces", "检测到多张人脸，请上传单人照片。", face_count=len(faces), start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing, **common)
         x, y, detected_width, detected_height = [int(value) for value in faces[0]]
         scale_x = width / detection_width
@@ -201,6 +241,11 @@ def assess_photo_quality(upload: Any, *, min_face_pixels: int = MIN_FACE_PIXELS)
         if face_gray.size == 0:
             raise RuntimeError("检测到的人脸区域为空")
         detected_eyes = eyes.detectMultiScale(face_gray, scaleFactor=1.1, minNeighbors=5, minSize=(max(10, detected_width // 10), max(10, detected_height // 10)))
+        # This is intentionally a soft, post-call budget. A synchronous C call
+        # cannot be interrupted safely here; the evidence/report must not call
+        # it a strict timeout or claim cancellation.
+        if time.perf_counter() - start_wall > DETECTION_BUDGET_SECONDS:
+            return _result("detection_error", "detection_budget_exceeded", f"人脸质量检测超过 {DETECTION_BUDGET_SECONDS:.1f} 秒软预算；当前 OpenCV 调用无法在进程内硬中断。", start_wall=start_wall, start_cpu=start_cpu, started_tracing=started_tracing, timeout_mode="best_effort", **common)
         if len(detected_eyes) < 2:
             issues.append(("occluded_face", "疑似存在遮挡、明显侧脸或面部关键区域不可见。"))
         if sharpness < MIN_SHARPNESS:

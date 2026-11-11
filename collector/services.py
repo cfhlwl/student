@@ -1243,7 +1243,6 @@ def _finalize_upload_session_locked(*, session_id, token, manifest_digest=None, 
             raise ValidationError("相关文档尚未全部上传")
         photo_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in photo_rows]
         document_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in document_rows]
-        _assert_quality_evidence(photo_inputs, quality_evidence)
         roster_candidate = PreparedUpload(session.roster_original_name, session.roster_original_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 0, "", stored_name=roster_path)
         result_token = _session_result_token(session.id)
         submission, result_token = _create_submission_records(
