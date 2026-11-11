@@ -28,7 +28,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
-from .photo_quality import assess_photo_quality, face_quality_blocking_enabled
+from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
@@ -355,15 +355,75 @@ def _prepare_photos(photo_uploads):
     total_size = 0
     for upload in photo_uploads:
         content_type, sha256 = image_bytes_info(upload)
-        if face_quality_blocking_enabled():
-            quality = assess_photo_quality(upload)
-            if not quality.passed:
-                raise ValidationError(f"照片 {upload.name} 未通过人脸质量检查：{quality.message}")
         prepared.append(PreparedUpload(upload.name, _safe_upload_name(upload), content_type, upload.size, sha256, source=upload))
         total_size += upload.size
     if total_size > settings.MAX_BATCH_UPLOAD_SIZE_MB * 1024 * 1024:
         raise ValidationError(f"本批照片总大小不能超过 {settings.MAX_BATCH_UPLOAD_SIZE_MB} MB")
     return prepared
+
+
+def _quality_policy_for_write():
+    try:
+        return read_face_quality_policy()
+    except PhotoQualityPolicyError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
+def _validate_photo_quality(prepared):
+    """Run the expensive check before the collection write gate is acquired."""
+    policy = _quality_policy_for_write()
+    if not policy.enabled:
+        return []
+    evidence = []
+    for item in prepared:
+        source = item.source
+        close_source = False
+        try:
+            if source is None:
+                source = default_storage.open(item.stored_name, "rb")
+                close_source = True
+            quality = assess_photo_quality(source)
+        finally:
+            if close_source:
+                source.close()
+        if not quality.passed:
+            raise ValidationError(f"照片 {item.original_name} 未通过人脸质量检查：{quality.message}")
+        evidence.append({
+            "sha256": item.sha256,
+            "policy_version": policy.version,
+            "blocking_enabled": True,
+            "quality": quality.as_dict(),
+        })
+    return evidence
+
+
+def _assert_quality_evidence(prepared, evidence):
+    """Re-check the binding under the write gate without running OpenCV there."""
+    policy = _quality_policy_for_write()
+    if not policy.enabled:
+        return
+    if len(evidence or []) != len(prepared):
+        raise ValidationError("照片质量检查凭证缺失，请重新提交")
+    for item, proof in zip(prepared, evidence):
+        if (
+            proof.get("sha256") != item.sha256
+            or proof.get("policy_version") != policy.version
+            or proof.get("blocking_enabled") is not True
+            or not proof.get("quality", {}).get("status") == "passed"
+        ):
+            raise ValidationError("照片质量检查凭证已失效，请重新提交")
+        if item.stored_name:
+            digest = hashlib.sha256()
+            total = 0
+            try:
+                with default_storage.open(item.stored_name, "rb") as source:
+                    while chunk := source.read(1024 * 1024):
+                        total += len(chunk)
+                        digest.update(chunk)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                raise ValidationError(f"照片 {item.original_name} 文件已丢失，请重新上传") from exc
+            if total != item.size or not hmac.compare_digest(digest.hexdigest(), item.sha256):
+                raise ValidationError(f"照片 {item.original_name} 内容已变化，请重新上传")
 
 
 def _prepare_documents(document_uploads):
@@ -474,7 +534,8 @@ def _submission_is_complete(submission, *, expected_student_count=None, expected
     ).exists()
 
 
-def _create_submission_records(*, records, roster_name, roster_candidate, photo_inputs, document_inputs, note, ip_address, access_token=None, expected_student_count=None, expected_photo_count=None, expected_document_count=None):
+def _create_submission_records(*, records, roster_name, roster_candidate, photo_inputs, document_inputs, note, ip_address, access_token=None, expected_student_count=None, expected_photo_count=None, expected_document_count=None, quality_evidence=None):
+    _assert_quality_evidence(photo_inputs, quality_evidence)
     scopes = {(r.get("学部"), r.get("学年"), r.get("年级"), r.get("班级")) for r in records}
     if len(scopes) != 1:
         raise ValidationError("一次提交只能包含同一学部、学年、年级和班级的学生")
@@ -604,6 +665,20 @@ def _create_submission_records(*, records, roster_name, roster_candidate, photo_
 
 
 @collection_write_required
+def _create_submission_locked(*, records, roster_upload, prepared_photos, prepared_documents, note="", ip_address=None, quality_evidence=None):
+    _check_storage_quota(roster_upload.size + sum(item.size for item in prepared_photos + prepared_documents))
+    return _create_submission_records(
+        records=records,
+        roster_name=roster_upload.name,
+        roster_candidate=PreparedUpload(roster_upload.name, _safe_upload_name(roster_upload), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", roster_upload.size, "", source=roster_upload),
+        photo_inputs=prepared_photos,
+        document_inputs=prepared_documents,
+        note=note,
+        ip_address=ip_address,
+        quality_evidence=quality_evidence,
+    )
+
+
 def create_submission(*, roster_upload, photo_uploads, document_uploads, note="", ip_address=None):
     records = parse_roster(roster_upload)
     if len(photo_uploads) > settings.MAX_PHOTOS_PER_SUBMISSION:
@@ -614,15 +689,15 @@ def create_submission(*, roster_upload, photo_uploads, document_uploads, note=""
         raise ValidationError("照片或文档数量超过单批上限，请使用分批上传")
     prepared_photos = _prepare_photos(photo_uploads)
     prepared_documents = _prepare_documents(document_uploads)
-    _check_storage_quota(roster_upload.size + sum(item.size for item in prepared_photos + prepared_documents))
-    return _create_submission_records(
+    quality_evidence = _validate_photo_quality(prepared_photos)
+    return _create_submission_locked(
         records=records,
-        roster_name=roster_upload.name,
-        roster_candidate=PreparedUpload(roster_upload.name, _safe_upload_name(roster_upload), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", roster_upload.size, "", source=roster_upload),
-        photo_inputs=prepared_photos,
-        document_inputs=prepared_documents,
+        roster_upload=roster_upload,
+        prepared_photos=prepared_photos,
+        prepared_documents=prepared_documents,
         note=note,
         ip_address=ip_address,
+        quality_evidence=quality_evidence,
     )
 
 
@@ -743,8 +818,23 @@ def start_upload_session(*, roster_upload, document_uploads, expected_photo_coun
         raise
 
 
-@collection_write_required
 def stage_upload_batch(session_id, kind, sequence, uploads, *, token=None, manifest_digest=None, roster_fingerprint=None, trusted_internal=False, already_prepared=False):
+    """Prepare and hash uploads before waiting for SQLite's write gate."""
+    if kind == "photo" and not already_prepared:
+        prepared = _prepare_photos(uploads)
+    elif kind == "document" and not already_prepared:
+        prepared = _prepare_documents(uploads)
+    else:
+        prepared = uploads
+    return _stage_upload_batch_locked(
+        session_id, kind, sequence, prepared, token=token,
+        manifest_digest=manifest_digest, roster_fingerprint=roster_fingerprint,
+        trusted_internal=trusted_internal, already_prepared=True,
+    )
+
+
+@collection_write_required
+def _stage_upload_batch_locked(session_id, kind, sequence, uploads, *, token=None, manifest_digest=None, roster_fingerprint=None, trusted_internal=False, already_prepared=False):
     if kind not in {"photo", "document"}:
         raise ValidationError("上传批次类型不正确")
     if sequence < 0:
@@ -904,17 +994,27 @@ def _check_submission_token(submission, token):
         raise ValidationError("访问凭证无效")
 
 
-@collection_write_required
 def create_photo_supplement(*, submission_id, token, photo_uploads, note="", ip_address=None):
+    prepared = _prepare_photos(photo_uploads)
+    quality_evidence = _validate_photo_quality(prepared)
+    return _create_photo_supplement_locked(
+        submission_id=submission_id, token=token, prepared_uploads=prepared,
+        quality_evidence=quality_evidence, note=note, ip_address=ip_address,
+    )
+
+
+@collection_write_required
+def _create_photo_supplement_locked(*, submission_id, token, prepared_uploads, quality_evidence=None, note="", ip_address=None):
     submission = _with_db_retry(lambda: Submission.objects.prefetch_related("students").get(pk=submission_id))
     _check_submission_token(submission, token)
     if submission.status == "rejected":
         raise ValidationError("退回的提交版本不能补传照片")
-    if not photo_uploads:
+    prepared = prepared_uploads
+    if not prepared:
         raise ValidationError("请选择需要补传的照片")
-    if len(photo_uploads) > settings.MAX_PHOTOS_PER_BATCH:
+    if len(prepared) > settings.MAX_PHOTOS_PER_BATCH:
         raise ValidationError(f"每次最多补传 {settings.MAX_PHOTOS_PER_BATCH} 张照片")
-    prepared = _prepare_photos(photo_uploads)
+    _assert_quality_evidence(prepared, quality_evidence)
     _check_storage_quota(sum(item.size for item in prepared))
 
     def create_rows():
@@ -1064,8 +1164,28 @@ def _mark_upload_session_completed(session_id, submission):
         locked.save(update_fields=["status", "completed_submission", "updated_at"])
 
 
+def _validate_staged_photo_quality(*, session_id, token, manifest_digest=None, roster_fingerprint=None):
+    """Perform the authoritative expensive check before the write gate."""
+    policy = _quality_policy_for_write()
+    if not policy.enabled:
+        return []
+    session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
+    _check_upload_token(session, token)
+    if session.status == "completed":
+        return []
+    if session.photo_manifest_digest and manifest_digest != session.photo_manifest_digest:
+        raise ValidationError("照片清单已变化，请重新选择 Excel 和照片后提交")
+    if session.roster_fingerprint and roster_fingerprint != session.roster_fingerprint:
+        raise ValidationError("Excel 文件已变化，请重新选择 Excel 和照片后提交")
+    rows = list(StagedUpload.objects.filter(batch__session=session, batch__kind="photo").select_related("batch").order_by("batch__sequence", "ordinal"))
+    if len(rows) != session.expected_photo_count:
+        raise ValidationError(f"照片尚未全部上传，已收到 {len(rows)} 张，应为 {session.expected_photo_count} 张")
+    prepared = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in rows]
+    return _validate_photo_quality(prepared)
+
+
 @collection_write_required
-def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_fingerprint=None, ip_address=None):
+def _finalize_upload_session_locked(*, session_id, token, manifest_digest=None, roster_fingerprint=None, ip_address=None, quality_evidence=None):
     session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
     _check_upload_token(session, token)
 
@@ -1121,14 +1241,9 @@ def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_f
             raise ValidationError(f"照片尚未全部上传，已收到 {len(photo_rows)} 张，应为 {session.expected_photo_count} 张")
         if len(document_rows) != session.expected_document_count:
             raise ValidationError("相关文档尚未全部上传")
-        if face_quality_blocking_enabled():
-            for row in photo_rows:
-                with default_storage.open(row.file.name, "rb") as photo_source:
-                    quality = assess_photo_quality(photo_source)
-                if not quality.passed:
-                    raise ValidationError(f"照片 {row.original_name} 未通过人脸质量检查：{quality.message}")
         photo_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in photo_rows]
         document_inputs = [PreparedUpload(row.original_name, row.original_name, row.content_type, row.size, row.sha256, stored_name=row.file.name) for row in document_rows]
+        _assert_quality_evidence(photo_inputs, quality_evidence)
         roster_candidate = PreparedUpload(session.roster_original_name, session.roster_original_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 0, "", stored_name=roster_path)
         result_token = _session_result_token(session.id)
         submission, result_token = _create_submission_records(
@@ -1143,6 +1258,7 @@ def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_f
             expected_student_count=len(records),
             expected_photo_count=session.expected_photo_count,
             expected_document_count=session.expected_document_count,
+            quality_evidence=quality_evidence,
         )
         _with_db_retry(lambda: _mark_upload_session_completed(session.id, submission))
         _delete_stored_files([roster_path] + [row.file.name for row in photo_rows + document_rows])
@@ -1150,6 +1266,23 @@ def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_f
     except Exception:
         _with_db_retry(lambda: UploadSession.objects.filter(pk=session.id, status="finalizing").update(status="pending"))
         raise
+
+
+def finalize_upload_session(*, session_id, token, manifest_digest=None, roster_fingerprint=None, ip_address=None):
+    quality_evidence = _validate_staged_photo_quality(
+        session_id=session_id,
+        token=token,
+        manifest_digest=manifest_digest,
+        roster_fingerprint=roster_fingerprint,
+    )
+    return _finalize_upload_session_locked(
+        session_id=session_id,
+        token=token,
+        manifest_digest=manifest_digest,
+        roster_fingerprint=roster_fingerprint,
+        ip_address=ip_address,
+        quality_evidence=quality_evidence,
+    )
 
 
 def validate_naming_rule(rule):

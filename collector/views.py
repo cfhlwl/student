@@ -9,7 +9,7 @@ from django.contrib import messages
 from django.contrib.auth.views import LoginView, LogoutView
 from django.contrib.auth.decorators import user_passes_test
 from django.core.paginator import Paginator
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -21,7 +21,7 @@ from .backup import BackupError, clear_collection_safely
 from .maintenance import MaintenanceError, collection_maintenance_gate, collection_write_gate, public_upload_is_open, read_state, write_state
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
-from .photo_quality import face_quality_blocking_enabled
+from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, read_face_quality_policy
 from .preflight import run_preflight
 from .services import ValidationError, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 from .statistics import build_admin_statistics_context, build_exception_workbook
@@ -549,14 +549,25 @@ def toggle_upload(request):
 @require_POST
 @staff_required
 def toggle_photo_quality(request):
-    enabled = not face_quality_blocking_enabled()
-    AppSetting.set_value("photo_face_quality_blocking", enabled)
-    AuditLog.objects.create(
-        actor=request.user,
-        action="toggle_photo_face_quality_blocking",
-        detail={"enabled": enabled},
-        ip_address=client_ip(request),
-    )
+    try:
+        with collection_maintenance_gate() as previous_state:
+            if previous_state == "clearing":
+                raise MaintenanceError("资料正在清空或恢复，请稍后再试")
+            with transaction.atomic():
+                enabled = not read_face_quality_policy().enabled
+                AppSetting.set_value("photo_face_quality_blocking", enabled)
+                AuditLog.objects.create(
+                    actor=request.user,
+                    action="toggle_photo_face_quality_blocking",
+                    detail={"enabled": enabled},
+                    ip_address=client_ip(request),
+                )
+    except (MaintenanceError, PhotoQualityPolicyError) as exc:
+        messages.error(request, str(exc))
+        return redirect("admin-dashboard")
+    except Exception:
+        messages.error(request, "不合格照片拦截设置未保存，审计记录也未写入，请稍后重试。")
+        return redirect("admin-dashboard")
     messages.success(request, "不合格照片拦截已" + ("开启" if enabled else "关闭") + "。")
     return redirect("admin-dashboard")
 

@@ -31,7 +31,10 @@ def photo_file(name, *, color=(220, 80, 60), broken=False):
     return data
 
 
-def test_preflight_reports_match_missing_and_same_name_manual_warning():
+def test_preflight_reports_match_missing_and_same_name_manual_warning(monkeypatch):
+    # This is a pure preflight test without a Django database. Policy failure
+    # handling is covered separately in the photo-quality service tests.
+    monkeypatch.setattr("collector.preflight.quality_issue_level", lambda result: "warning")
     roster = roster_file(
         ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型"],
         [

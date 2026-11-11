@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from openpyxl import load_workbook
 from PIL import Image, UnidentifiedImageError
 
-from .photo_quality import assess_photo_quality, quality_issue_level
+from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, quality_issue_level
 
 
 DEPARTMENTS = {"初中部", "高中部"}
@@ -345,13 +345,12 @@ def _read_photos(uploads: Iterable[Any], result: PreflightResult, limits: Prefli
             status = "valid"
             quality = assess_photo_quality(upload)
             if quality.status != "passed":
-                _add_issue(
-                    result,
-                    code=quality.code,
-                    message=f"照片 {filename}：{quality.message}",
-                    level=quality_issue_level(quality),
-                    filename=filename,
-                )
+                try:
+                    level = quality_issue_level(quality)
+                except PhotoQualityPolicyError as exc:
+                    _add_issue(result, code="quality_policy_unavailable", message=str(exc), level="error", filename=filename)
+                else:
+                    _add_issue(result, code=quality.code, message=f"照片 {filename}：{quality.message}", level=level, filename=filename)
         except (UnidentifiedImageError, OSError, ValueError, EOFError):
             _add_issue(result, code="invalid_photo", message=f"照片 {filename} 损坏或无法读取", level="error", filename=filename)
             quality = None
