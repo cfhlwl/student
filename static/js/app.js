@@ -12,6 +12,14 @@ document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('input[type=file]').forEach(function (input) {
     input.addEventListener('change', function () {
       window.__studentUploadState = null;
+      const preflightPanel = document.getElementById('upload-preflight-result');
+      if (preflightPanel) {
+        preflightPanel.hidden = true;
+        const ack = preflightPanel.querySelector('[data-upload-warning-ack]');
+        if (ack) { ack.checked = false; ack.disabled = true; delete ack.dataset.preflightIdentity; }
+      }
+      const progressText = document.getElementById('upload-progress-text');
+      if (progressText) progressText.textContent = '';
       const target = document.querySelector('[data-file-count="' + input.name + '"]');
       const hint = input.closest('.upload-field')?.querySelector('.file-hint');
       const defaultHint = input.name === 'roster' ? '点击选择 .xlsx 文件' : input.name === 'photos' ? '点击或拖入照片' : '点击选择文档';
@@ -36,6 +44,7 @@ document.addEventListener('DOMContentLoaded', function () {
   if (submitForm && progress && submitButton) {
     const placeholder = '00000000-0000-0000-0000-000000000000';
     const storageKey = 'student-collector-upload-session-v3';
+    let uploadInFlight = false;
     const sleep = function (ms) { return new Promise(function (resolve) { window.setTimeout(resolve, ms); }); };
     function sha256Pure(buffer) {
       const bytes = new Uint8Array(buffer), words = new Uint32Array(64);
@@ -71,17 +80,25 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       return sha256Pure(buffer);
     }
-    async function buildPhotoManifest(files) {
+    async function buildPhotoManifest(files, onProgress) {
       const manifest = [];
-      for (const file of files) manifest.push({name: file.name, size: file.size, sha256: await fileFingerprint(file)});
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        manifest.push({name: file.name, size: file.size, sha256: await fileFingerprint(file)});
+        if (onProgress) onProgress(index + 1, files.length);
+      }
       return manifest;
     }
-    async function buildDocumentManifest(files) {
+    async function buildDocumentManifest(files, onProgress) {
       const manifest = [];
-      for (const file of files) manifest.push({name: file.name, size: file.size, sha256: await fileFingerprint(file)});
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        manifest.push({name: file.name, size: file.size, sha256: await fileFingerprint(file)});
+        if (onProgress) onProgress(index + 1, files.length);
+      }
       return manifest;
     }
-    async function runPreflight(roster, photos, csrf) {
+    async function runPreflight(roster, photos, csrf, onProgress) {
       const endpoint = submitForm.dataset.preflightEndpoint;
       if (!endpoint) return;
       if (photos.length > 300 || photos.reduce(function (total, file) { return total + file.size; }, 0) > 300 * 20 * 1024 * 1024) throw new Error('上传前预检查未通过：照片数量或总大小超过限制');
@@ -93,17 +110,62 @@ document.addEventListener('DOMContentLoaded', function () {
         batches.push(photos.slice(index, end)); index = end;
       }
       if (!batches.length) batches.push([]);
-      const errors = [], warnings = [];
-      for (const batch of batches) {
+      const aggregate = {photos: [], blocking_errors: [], warnings: [], summary: {photo_count: 0, quality_failed_count: 0, quality_passed_count: 0}};
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        const batch = batches[batchIndex];
+        if (onProgress) onProgress(batchIndex, batches.length);
         const body = new FormData(); body.append('roster', roster, roster.name); batch.forEach(function (file) { body.append('photos', file, file.name); });
         const response = await fetch(endpoint, {method: 'POST', body: body, credentials: 'same-origin', cache: 'no-store', headers: {'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest'}});
         let payload = {};
         try { payload = await response.json(); } catch (error) { throw new Error('上传前预检查返回无效结果，请重试'); }
         if (!response.ok) throw new Error(payload.error || '上传前预检查失败，请重试');
-        errors.push.apply(errors, payload.blocking_errors || []); warnings.push.apply(warnings, payload.warnings || []);
+        aggregate.photos.push.apply(aggregate.photos, payload.photos || []);
+        aggregate.blocking_errors.push.apply(aggregate.blocking_errors, payload.blocking_errors || []);
+        aggregate.warnings.push.apply(aggregate.warnings, payload.warnings || []);
+        if (onProgress) onProgress(batchIndex + 1, batches.length);
       }
-      if (errors.length) throw new Error('上传前预检查未通过：' + errors.slice(0, 6).map(function (item) { return item.message; }).join('；'));
-      if (warnings.length && !window.confirm('上传前预检查发现 ' + warnings.length + ' 项提醒：\n\n' + warnings.slice(0, 6).map(function (item) { return item.message; }).join('\n') + '\n\n确认已核对并继续提交吗？')) throw new Error('已取消提交，请根据预检查提醒调整文件后重试');
+      aggregate.summary.photo_count = aggregate.photos.length;
+      aggregate.summary.quality_failed_count = aggregate.photos.filter(function (photo) { return photo.quality_status === 'failed'; }).length;
+      aggregate.summary.quality_passed_count = aggregate.photos.filter(function (photo) { return photo.quality_status === 'passed'; }).length;
+      return aggregate;
+    }
+    function renderUploadPreflight(payload, identity) {
+      const panel = document.getElementById('upload-preflight-result');
+      if (!panel) return;
+      const summary = payload.summary || {};
+      Object.keys(summary).forEach(function (key) { const node = panel.querySelector('[data-upload-summary="' + key + '"]'); if (node) node.textContent = String(summary[key]); });
+      ['blocking_errors', 'warnings'].forEach(function (key) {
+        const box = panel.querySelector('[data-upload-issues="' + key + '"]');
+        if (!box) return;
+        const list = box.querySelector('ul'); list.textContent = '';
+        (payload[key] || []).forEach(function (issue) { const item = document.createElement('li'); item.textContent = (issue.filename ? issue.filename + '：' : '') + issue.message; list.appendChild(item); });
+        box.hidden = !(payload[key] || []).length;
+      });
+      const photoList = panel.querySelector('[data-upload-photo-results]');
+      if (photoList) {
+        photoList.textContent = '';
+        (payload.photos || []).forEach(function (photo) {
+          const item = document.createElement('li');
+          const status = photo.quality_status === 'passed' ? '通过' : photo.quality_status === 'failed' ? '不合格' : '未检测';
+          item.className = photo.quality_status === 'failed' ? 'quality-failed' : photo.quality_status === 'passed' ? 'quality-passed' : '';
+          item.textContent = photo.filename + '：' + status + (photo.quality_message ? ' · ' + photo.quality_message : '');
+          photoList.appendChild(item);
+        });
+      }
+      const ack = panel.querySelector('[data-upload-warning-ack]');
+      if (ack) {
+        if (identity && ack.dataset.preflightIdentity !== identity) {
+          ack.checked = false;
+          ack.dataset.preflightIdentity = identity;
+        }
+        if (!identity) { ack.checked = false; delete ack.dataset.preflightIdentity; }
+        ack.disabled = !(payload.warnings || []).length;
+      }
+      panel.hidden = false;
+    }
+    function clearUploadPreflight() {
+      const panel = document.getElementById('upload-preflight-result');
+      if (panel) panel.hidden = true;
     }
     function persist(state) { window.__studentUploadState = state; sessionStorage.setItem(storageKey, JSON.stringify(state)); }
     function clearPersisted() { window.__studentUploadState = null; sessionStorage.removeItem(storageKey); }
@@ -140,9 +202,16 @@ document.addEventListener('DOMContentLoaded', function () {
       const batchSize = Number(submitForm.dataset.photoBatchSize || 20), documentBatchSize = 10, batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024, csrf = submitForm.querySelector('[name=csrfmiddlewaretoken]').value;
       const files = Array.from(photoInput?.files || []), documents = Array.from(documentInput?.files || []);
       if (!rosterInput?.files[0]) throw new Error('请先选择 Excel 名单');
-      const photoManifest = await buildPhotoManifest(files), documentManifest = await buildDocumentManifest(documents), rosterFingerprint = await fileFingerprint(rosterInput.files[0]);
-      await runPreflight(rosterInput.files[0], files, csrf);
+      setProgress(1, '正在读取文件并计算安全校验…');
+      const photoManifest = await buildPhotoManifest(files, function (done, total) { setProgress(1 + Math.round((done / Math.max(total, 1)) * 6), '正在计算照片校验：' + done + '/' + total); });
+      const documentManifest = await buildDocumentManifest(documents, function (done, total) { setProgress(7 + Math.round((done / Math.max(total, 1)) * 2), '正在计算文档校验：' + done + '/' + total); });
+      const rosterFingerprint = await fileFingerprint(rosterInput.files[0]);
       const inputKey = JSON.stringify({rosterFingerprint: rosterFingerprint, photoManifest: photoManifest, documentManifest: documentManifest});
+      const preflight = await runPreflight(rosterInput.files[0], files, csrf, function (current, total) { setProgress(10 + Math.round((current / total) * 20), '正在预检查第 ' + Math.min(current + 1, total) + '/' + total + ' 批…'); });
+      const preflightIdentity = await textFingerprint(JSON.stringify({inputKey: inputKey, photos: preflight.photos, blocking_errors: preflight.blocking_errors, warnings: preflight.warnings}));
+      renderUploadPreflight(preflight, preflightIdentity);
+      if (preflight.blocking_errors.length) { const error = new Error('上传前预检查未通过，请按页面中的阻断错误修改后重新检测'); error.preflightRendered = true; throw error; }
+      if (preflight.warnings.length && !submitForm.querySelector('[data-upload-warning-ack]')?.checked) { const error = new Error('请先在页面中核对预检查提醒，再勾选确认继续上传'); error.preflightRendered = true; throw error; }
       let state = window.__studentUploadState;
       try { if (!state) state = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); } catch (error) { state = null; }
       if (state && (state.inputKey !== inputKey || !state.idempotencyKey)) { clearPersisted(); state = null; }
@@ -181,7 +250,19 @@ document.addEventListener('DOMContentLoaded', function () {
       const completed = await retryRequest(function () { return xhrJson(urlFor(submitForm.dataset.uploadComplete, state.id), completeData, csrf); });
       clearPersisted(); setProgress(100, '全部提交成功'); window.location.href = completed.result_url;
     }
-    function handleUploadError(error) { submitButton.disabled = false; submitButton.textContent = '继续上传 →'; if (retryButton) retryButton.hidden = !sessionStorage.getItem(storageKey); if (progressText) progressText.textContent = error.message; window.alert(error.message); }
+    function handleUploadError(error) { if (retryButton) retryButton.hidden = !sessionStorage.getItem(storageKey); if (progressText) progressText.textContent = error.message; if (error && error.message && !error.preflightRendered) renderUploadPreflight({blocking_errors: [{message: error.message}], warnings: [], photos: []}); }
+    function startUploadFlow() {
+      if (uploadInFlight) { setProgress(0, '正在处理当前提交，请勿重复点击…'); return; }
+      uploadInFlight = true;
+      submitButton.disabled = true;
+      submitButton.textContent = '正在检查…';
+      setProgress(0, '正在准备文件检查…');
+      uploadInBatches().catch(handleUploadError).finally(function () {
+        uploadInFlight = false;
+        submitButton.disabled = false;
+        submitButton.textContent = '检查并提交 →';
+      });
+    }
     submitForm.addEventListener('submit', function (event) {
       const photoInput = submitForm.querySelector('[name=photos]'), documentInput = submitForm.querySelector('[name=documents]');
       const batchSize = Number(submitForm.dataset.photoBatchSize || 20), batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024;
@@ -189,10 +270,12 @@ document.addEventListener('DOMContentLoaded', function () {
       const totalDocumentBytes = Array.from(documentInput?.files || []).reduce(function (total, file) { return total + file.size; }, 0);
       const rosterBytes = submitForm.querySelector('[name=roster]')?.files[0]?.size || 0;
       const shouldBatch = photoInput && (photoInput.files.length > batchSize || totalPhotoBytes > batchBytes || totalPhotoBytes + totalDocumentBytes + rosterBytes > batchBytes || photoInput.files.length || (documentInput && documentInput.files.length) || sessionStorage.getItem(storageKey));
-      if (shouldBatch) { event.preventDefault(); uploadInBatches().catch(handleUploadError); return; }
+      if (uploadInFlight) { event.preventDefault(); setProgress(0, '正在处理当前提交，请勿重复点击…'); return; }
+      if (shouldBatch) { event.preventDefault(); startUploadFlow(); return; }
+      uploadInFlight = true;
       progress.style.display = 'block'; submitButton.disabled = true; submitButton.textContent = '正在上传…';
     });
-    if (retryButton) retryButton.addEventListener('click', function () { uploadInBatches().catch(handleUploadError); });
+    if (retryButton) retryButton.addEventListener('click', function () { startUploadFlow(); });
   }
   const mode = document.querySelector('[name=mode]');
   const template = document.querySelector('[name=template]');

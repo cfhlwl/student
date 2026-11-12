@@ -75,8 +75,14 @@ def test_r3_supplement_token_is_submission_scoped(settings, tmp_path):
 @pytest.mark.django_db
 def test_r3_start_retry_is_idempotent(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
-    first, first_token, first_count = start_upload_session(roster_upload=roster_upload(), document_uploads=[], idempotency_key="a" * 64)
-    second, second_token, second_count = start_upload_session(roster_upload=roster_upload(), document_uploads=[], idempotency_key="a" * 64)
+    source = roster_upload()
+    roster_bytes = source.read()
+    first_upload = SimpleUploadedFile(source.name, roster_bytes, content_type=source.content_type)
+    second_upload = SimpleUploadedFile(source.name, roster_bytes, content_type=source.content_type)
+    assert first_upload is not second_upload
+    assert first_upload.size == second_upload.size == len(roster_bytes)
+    first, first_token, first_count = start_upload_session(roster_upload=first_upload, document_uploads=[], idempotency_key="a" * 64)
+    second, second_token, second_count = start_upload_session(roster_upload=second_upload, document_uploads=[], idempotency_key="a" * 64)
     assert second.id == first.id
     assert second_token == first_token
     assert (second_count, first_count) == (1, 1)

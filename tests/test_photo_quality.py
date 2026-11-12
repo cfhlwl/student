@@ -32,6 +32,7 @@ def photo_upload():
 def test_admin_can_toggle_photo_quality_blocking(client):
     admin = User.objects.create_user(username="quality-admin", password="strong-password-123", is_staff=True)
     client.force_login(admin)
+    AppSetting.set_value("photo_face_quality_detection_enabled", True)
 
     response = client.post(reverse("toggle-photo-quality"))
 

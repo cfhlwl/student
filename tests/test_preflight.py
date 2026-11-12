@@ -3,6 +3,7 @@ import io
 from openpyxl import Workbook
 from PIL import Image
 
+from collector.photo_quality import PhotoQualityPolicy
 from collector.preflight import PreflightLimits, run_preflight
 
 
@@ -43,7 +44,11 @@ def test_preflight_reports_match_missing_and_same_name_manual_warning(monkeypatc
             ["王芳", "女", "高中部", "2026", "高一", "1", "半走读"],
         ],
     )
-    result = run_preflight(roster, [photo_file("张三.jpg"), photo_file("陌生人.jpg")])
+    result = run_preflight(
+        roster,
+        [photo_file("张三.jpg"), photo_file("陌生人.jpg")],
+        quality_policy=PhotoQualityPolicy(detection_enabled=True),
+    )
 
     assert result.summary == {
         "student_count": 3,

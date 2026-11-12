@@ -43,9 +43,11 @@
         <section class="error-box" data-issues="blocking_errors" hidden><h2>阻断错误</h2><ul></ul></section>
         <section class="warning-box" data-issues="warnings" hidden><h2>普通警告</h2><ul></ul><label><input type="checkbox" data-warning-ack> 我已核对警告，仍继续提交</label></section>
       </div>
+      <p class="upload-progress-text" data-preflight-progress aria-live="polite"></p>
+      <details class="quality-results"><summary>按文件查看检测结果</summary><ul data-preflight-photo-results></ul></details>
       <button class="button primary" type="button" data-preflight-continue disabled>继续提交</button>
     </section>
   </section>
 </main>
 {% endblock %}
-{% block scripts %}<script src="{% static 'js/preflight.js' %}?v=20261104-2"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'js/preflight.js' %}?v=20261112-1"></script>{% endblock %}
