@@ -559,9 +559,11 @@ def toggle_photo_quality(request):
             if previous_state == "clearing":
                 raise MaintenanceError("资料正在清空或恢复，请稍后再试")
             with transaction.atomic():
-                enabled = not read_face_quality_policy().blocking_enabled
-                if enabled:
-                    AppSetting.set_value("photo_face_quality_detection_enabled", True)
+                policy = read_face_quality_policy()
+                if not policy.detection_enabled:
+                    messages.warning(request, "请先开启人脸质量检测，再开启不合格照片拦截。")
+                    return redirect("admin-dashboard")
+                enabled = not policy.blocking_enabled
                 AppSetting.set_value("photo_face_quality_blocking", enabled)
                 AuditLog.objects.create(
                     actor=request.user,

@@ -181,3 +181,37 @@ def test_upload_ui_uses_inline_results_and_keeps_admin_clear_confirmation():
     assert "upload-preflight-result" in submit
     assert "photo_quality_detection" in dashboard
     assert "confirm('此操作将先备份" in dashboard
+
+
+@pytest.mark.django_db
+def test_blocking_post_cannot_enable_detection_when_master_is_off(client):
+    admin = User.objects.create_user(username="blocking-off-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    AppSetting.objects.all().delete()
+
+    response = client.post(reverse("toggle-photo-quality"))
+
+    assert response.status_code == 302
+    policy = read_face_quality_policy()
+    assert policy.detection_enabled is False
+    assert policy.blocking_enabled is False
+
+
+@pytest.mark.django_db
+def test_dashboard_disables_blocking_control_when_detection_is_off(client):
+    admin = User.objects.create_user(username="dashboard-off-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    AppSetting.objects.all().delete()
+
+    body = client.get(reverse("admin-dashboard")).content.decode()
+
+    assert 'name="photo-quality-blocking-disabled"' in body
+    assert "需先开启人脸质量检测" in body
+
+
+def test_upload_ui_has_singleflight_progress_and_identity_bound_ack():
+    app = Path("static/js/app.js").read_text(encoding="utf-8")
+    assert "uploadInFlight" in app
+    assert "正在预检查第 " in app
+    assert "preflightIdentity" in app
+    assert "ack.checked = false" in app
