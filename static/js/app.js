@@ -12,6 +12,8 @@ document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('input[type=file]').forEach(function (input) {
     input.addEventListener('change', function () {
       window.__studentUploadState = null;
+      const preflightPanel = document.getElementById('upload-preflight-result');
+      if (preflightPanel) preflightPanel.hidden = true;
       const target = document.querySelector('[data-file-count="' + input.name + '"]');
       const hint = input.closest('.upload-field')?.querySelector('.file-hint');
       const defaultHint = input.name === 'roster' ? '点击选择 .xlsx 文件' : input.name === 'photos' ? '点击或拖入照片' : '点击选择文档';
@@ -93,17 +95,52 @@ document.addEventListener('DOMContentLoaded', function () {
         batches.push(photos.slice(index, end)); index = end;
       }
       if (!batches.length) batches.push([]);
-      const errors = [], warnings = [];
+      const aggregate = {photos: [], blocking_errors: [], warnings: [], summary: {photo_count: 0, quality_failed_count: 0, quality_passed_count: 0}};
       for (const batch of batches) {
         const body = new FormData(); body.append('roster', roster, roster.name); batch.forEach(function (file) { body.append('photos', file, file.name); });
         const response = await fetch(endpoint, {method: 'POST', body: body, credentials: 'same-origin', cache: 'no-store', headers: {'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest'}});
         let payload = {};
         try { payload = await response.json(); } catch (error) { throw new Error('上传前预检查返回无效结果，请重试'); }
         if (!response.ok) throw new Error(payload.error || '上传前预检查失败，请重试');
-        errors.push.apply(errors, payload.blocking_errors || []); warnings.push.apply(warnings, payload.warnings || []);
+        aggregate.photos.push.apply(aggregate.photos, payload.photos || []);
+        aggregate.blocking_errors.push.apply(aggregate.blocking_errors, payload.blocking_errors || []);
+        aggregate.warnings.push.apply(aggregate.warnings, payload.warnings || []);
       }
-      if (errors.length) throw new Error('上传前预检查未通过：' + errors.slice(0, 6).map(function (item) { return item.message; }).join('；'));
-      if (warnings.length && !window.confirm('上传前预检查发现 ' + warnings.length + ' 项提醒：\n\n' + warnings.slice(0, 6).map(function (item) { return item.message; }).join('\n') + '\n\n确认已核对并继续提交吗？')) throw new Error('已取消提交，请根据预检查提醒调整文件后重试');
+      aggregate.summary.photo_count = aggregate.photos.length;
+      aggregate.summary.quality_failed_count = aggregate.photos.filter(function (photo) { return photo.quality_status === 'failed'; }).length;
+      aggregate.summary.quality_passed_count = aggregate.photos.filter(function (photo) { return photo.quality_status === 'passed'; }).length;
+      return aggregate;
+    }
+    function renderUploadPreflight(payload) {
+      const panel = document.getElementById('upload-preflight-result');
+      if (!panel) return;
+      const summary = payload.summary || {};
+      Object.keys(summary).forEach(function (key) { const node = panel.querySelector('[data-upload-summary="' + key + '"]'); if (node) node.textContent = String(summary[key]); });
+      ['blocking_errors', 'warnings'].forEach(function (key) {
+        const box = panel.querySelector('[data-upload-issues="' + key + '"]');
+        if (!box) return;
+        const list = box.querySelector('ul'); list.textContent = '';
+        (payload[key] || []).forEach(function (issue) { const item = document.createElement('li'); item.textContent = (issue.filename ? issue.filename + '：' : '') + issue.message; list.appendChild(item); });
+        box.hidden = !(payload[key] || []).length;
+      });
+      const photoList = panel.querySelector('[data-upload-photo-results]');
+      if (photoList) {
+        photoList.textContent = '';
+        (payload.photos || []).forEach(function (photo) {
+          const item = document.createElement('li');
+          const status = photo.quality_status === 'passed' ? '通过' : photo.quality_status === 'failed' ? '不合格' : '未检测';
+          item.className = photo.quality_status === 'failed' ? 'quality-failed' : photo.quality_status === 'passed' ? 'quality-passed' : '';
+          item.textContent = photo.filename + '：' + status + (photo.quality_message ? ' · ' + photo.quality_message : '');
+          photoList.appendChild(item);
+        });
+      }
+      const ack = panel.querySelector('[data-upload-warning-ack]');
+      if (ack) ack.disabled = !(payload.warnings || []).length;
+      panel.hidden = false;
+    }
+    function clearUploadPreflight() {
+      const panel = document.getElementById('upload-preflight-result');
+      if (panel) panel.hidden = true;
     }
     function persist(state) { window.__studentUploadState = state; sessionStorage.setItem(storageKey, JSON.stringify(state)); }
     function clearPersisted() { window.__studentUploadState = null; sessionStorage.removeItem(storageKey); }
@@ -141,7 +178,10 @@ document.addEventListener('DOMContentLoaded', function () {
       const files = Array.from(photoInput?.files || []), documents = Array.from(documentInput?.files || []);
       if (!rosterInput?.files[0]) throw new Error('请先选择 Excel 名单');
       const photoManifest = await buildPhotoManifest(files), documentManifest = await buildDocumentManifest(documents), rosterFingerprint = await fileFingerprint(rosterInput.files[0]);
-      await runPreflight(rosterInput.files[0], files, csrf);
+      const preflight = await runPreflight(rosterInput.files[0], files, csrf);
+      renderUploadPreflight(preflight);
+      if (preflight.blocking_errors.length) { const error = new Error('上传前预检查未通过，请按页面中的阻断错误修改后重新检测'); error.preflightRendered = true; throw error; }
+      if (preflight.warnings.length && !submitForm.querySelector('[data-upload-warning-ack]')?.checked) { const error = new Error('请先在页面中核对预检查提醒，再勾选确认继续上传'); error.preflightRendered = true; throw error; }
       const inputKey = JSON.stringify({rosterFingerprint: rosterFingerprint, photoManifest: photoManifest, documentManifest: documentManifest});
       let state = window.__studentUploadState;
       try { if (!state) state = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); } catch (error) { state = null; }
@@ -181,7 +221,7 @@ document.addEventListener('DOMContentLoaded', function () {
       const completed = await retryRequest(function () { return xhrJson(urlFor(submitForm.dataset.uploadComplete, state.id), completeData, csrf); });
       clearPersisted(); setProgress(100, '全部提交成功'); window.location.href = completed.result_url;
     }
-    function handleUploadError(error) { submitButton.disabled = false; submitButton.textContent = '继续上传 →'; if (retryButton) retryButton.hidden = !sessionStorage.getItem(storageKey); if (progressText) progressText.textContent = error.message; window.alert(error.message); }
+    function handleUploadError(error) { submitButton.disabled = false; submitButton.textContent = '继续上传 →'; if (retryButton) retryButton.hidden = !sessionStorage.getItem(storageKey); if (progressText) progressText.textContent = error.message; if (error && error.message && !error.preflightRendered) renderUploadPreflight({blocking_errors: [{message: error.message}], warnings: [], photos: []}); }
     submitForm.addEventListener('submit', function (event) {
       const photoInput = submitForm.querySelector('[name=photos]'), documentInput = submitForm.querySelector('[name=documents]');
       const batchSize = Number(submitForm.dataset.photoBatchSize || 20), batchBytes = Number(submitForm.dataset.photoBatchMb || 32) * 1024 * 1024;

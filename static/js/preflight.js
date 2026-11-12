@@ -32,6 +32,17 @@
     });
     renderIssues(root, 'blocking_errors', payload.blocking_errors);
     renderIssues(root, 'warnings', payload.warnings);
+    var photoList = root.querySelector('[data-preflight-photo-results]');
+    if (photoList) {
+      photoList.textContent = '';
+      (payload.photos || []).forEach(function (photo) {
+        var item = document.createElement('li');
+        var status = photo.quality_status === 'passed' ? '通过' : photo.quality_status === 'failed' ? '不合格' : '未检测';
+        item.className = photo.quality_status === 'failed' ? 'quality-failed' : photo.quality_status === 'passed' ? 'quality-passed' : '';
+        item.textContent = photo.filename + '：' + status + (photo.quality_message ? ' · ' + photo.quality_message : '');
+        photoList.appendChild(item);
+      });
+    }
     result.hidden = false;
     updateContinue(root, payload);
   }
@@ -74,6 +85,8 @@
       aggregate.photos.push.apply(aggregate.photos, data.photos || []);
       aggregate.blocking_errors.push.apply(aggregate.blocking_errors, data.blocking_errors || []);
       aggregate.warnings.push.apply(aggregate.warnings, data.warnings || []);
+      var progress = form.closest('#preflight-app').querySelector('[data-preflight-progress]');
+      if (progress) progress.textContent = '已完成第 ' + (batchIndex + 1) + '/' + batches.length + ' 批检查';
     }
     aggregate.summary.photo_count = aggregate.photos.length;
     aggregate.summary.matched_count = aggregate.photos.filter(function (photo) { return photo.status === 'matched'; }).length;

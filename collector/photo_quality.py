@@ -43,9 +43,15 @@ class PhotoQualityModelUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class PhotoQualityPolicy:
-    enabled: bool
+    detection_enabled: bool = False
+    blocking_enabled: bool = False
     version: str = PHOTO_QUALITY_POLICY_VERSION
     configured: bool = False
+
+    @property
+    def enabled(self) -> bool:
+        """Backward-compatible alias for callers that mean blocking."""
+        return self.blocking_enabled
 
 
 @dataclass(frozen=True)
@@ -92,16 +98,40 @@ def read_face_quality_policy() -> PhotoQualityPolicy:
     """Read the policy without failing open on a database error."""
     try:
         from .models import AppSetting
-        setting = AppSetting.objects.filter(key="photo_face_quality_blocking").first()
+        settings = {
+            setting.key: setting.value
+            for setting in AppSetting.objects.filter(
+                key__in=("photo_face_quality_detection_enabled", "photo_face_quality_blocking")
+            )
+        }
     except Exception as exc:
-        raise PhotoQualityPolicyError("照片质量拦截策略读取失败，请稍后重试") from exc
-    if setting is None:
-        return PhotoQualityPolicy(enabled=False)
-    return PhotoQualityPolicy(enabled=setting.value.lower() in {"1", "true", "yes", "on"}, configured=True)
+        raise PhotoQualityPolicyError("照片质量检测策略读取失败，请稍后重试") from exc
+    blocking = settings.get("photo_face_quality_blocking", "").lower() in {"1", "true", "yes", "on"}
+    detection_setting = settings.get("photo_face_quality_detection_enabled")
+    # A legacy database has no master switch. Preserve an explicitly enabled
+    # legacy blocking policy, while legacy-off and new databases remain off.
+    detection = (
+        blocking
+        if detection_setting is None
+        else detection_setting.lower() in {"1", "true", "yes", "on"}
+    )
+    if not detection:
+        blocking = False
+    if detection_setting is None and not blocking:
+        return PhotoQualityPolicy()
+    return PhotoQualityPolicy(
+        detection_enabled=detection,
+        blocking_enabled=blocking,
+        configured=True,
+    )
+
+
+def face_quality_detection_enabled() -> bool:
+    return read_face_quality_policy().detection_enabled
 
 
 def face_quality_blocking_enabled() -> bool:
-    return read_face_quality_policy().enabled
+    return read_face_quality_policy().blocking_enabled
 
 
 @lru_cache(maxsize=1)

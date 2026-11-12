@@ -21,7 +21,7 @@ from .backup import BackupError, clear_collection_safely
 from .maintenance import MaintenanceError, collection_maintenance_gate, collection_write_gate, public_upload_is_open, read_state, write_state
 from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
-from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, read_face_quality_policy
+from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, face_quality_detection_enabled, read_face_quality_policy
 from .preflight import run_preflight
 from .services import ValidationError, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 from .statistics import build_admin_statistics_context, build_exception_workbook
@@ -77,7 +77,11 @@ def submit_preflight_page(request):
 
 @require_POST
 def submit_preflight(request):
-    result = run_preflight(request.FILES.get("roster"), request.FILES.getlist("photos"))
+    try:
+        policy = read_face_quality_policy()
+    except PhotoQualityPolicyError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+    result = run_preflight(request.FILES.get("roster"), request.FILES.getlist("photos"), quality_policy=policy)
     response = JsonResponse(result.as_dict())
     response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response["Pragma"] = "no-cache"
@@ -285,6 +289,7 @@ def admin_dashboard(request):
         "missing_count": students.exclude(match_status="matched").count(), "pending_count": Submission.objects.filter(status="pending").count(),
         "rejected_count": Submission.objects.filter(status="rejected").count(),
         "class_stats": class_stats, "upload_open": public_upload_is_open(),
+        "photo_quality_detection": face_quality_detection_enabled(),
         "photo_quality_blocking": face_quality_blocking_enabled(),
     }
     return render(request, "collector/admin_dashboard.html", context)
@@ -554,7 +559,9 @@ def toggle_photo_quality(request):
             if previous_state == "clearing":
                 raise MaintenanceError("资料正在清空或恢复，请稍后再试")
             with transaction.atomic():
-                enabled = not read_face_quality_policy().enabled
+                enabled = not read_face_quality_policy().blocking_enabled
+                if enabled:
+                    AppSetting.set_value("photo_face_quality_detection_enabled", True)
                 AppSetting.set_value("photo_face_quality_blocking", enabled)
                 AuditLog.objects.create(
                     actor=request.user,
@@ -569,6 +576,38 @@ def toggle_photo_quality(request):
         messages.error(request, "不合格照片拦截设置未保存，审计记录也未写入，请稍后重试。")
         return redirect("admin-dashboard")
     messages.success(request, "不合格照片拦截已" + ("开启" if enabled else "关闭") + "。")
+    return redirect("admin-dashboard")
+
+
+@require_POST
+@staff_required
+def toggle_photo_quality_detection(request):
+    try:
+        with collection_maintenance_gate() as previous_state:
+            if previous_state == "clearing":
+                raise MaintenanceError("资料正在清空或恢复，请稍后再试")
+            with transaction.atomic():
+                policy = read_face_quality_policy()
+                enabled = not policy.detection_enabled
+                AppSetting.set_value("photo_face_quality_detection_enabled", enabled)
+                if not enabled:
+                    AppSetting.set_value("photo_face_quality_blocking", False)
+                AuditLog.objects.create(
+                    actor=request.user,
+                    action="toggle_photo_face_quality_detection",
+                    detail={
+                        "detection_enabled": enabled,
+                        "blocking_enabled": enabled and policy.blocking_enabled,
+                    },
+                    ip_address=client_ip(request),
+                )
+    except (MaintenanceError, PhotoQualityPolicyError) as exc:
+        messages.error(request, str(exc))
+        return redirect("admin-dashboard")
+    except Exception:
+        messages.error(request, "人脸质量检测设置未保存，审计记录也未写入，请稍后重试。")
+        return redirect("admin-dashboard")
+    messages.success(request, "人脸质量检测已" + ("开启" if enabled else "关闭") + "。")
     return redirect("admin-dashboard")
 
 

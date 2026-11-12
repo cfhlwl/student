@@ -16,10 +16,16 @@
     </div>
     <label class="note-field"><span class="field-title">提交说明 <i class="soft">可选</i></span>{{ form.note }}</label>
     <div class="consent"><input type="checkbox" required id="consent"><label for="consent">我确认本次资料已获得学校规定的采集授权，并会在提交前核对文件内容。</label></div>
+    <section class="upload-preflight-result" id="upload-preflight-result" hidden aria-live="polite">
+      <div class="preflight-summary"><div><strong data-upload-summary="photo_count">0</strong><span>照片</span></div><div><strong data-upload-summary="quality_passed_count">0</strong><span>检测通过</span></div><div><strong data-upload-summary="quality_failed_count">0</strong><span>质量不合格</span></div></div>
+      <section class="error-box" data-upload-issues="blocking_errors" hidden><h3>阻断错误</h3><ul></ul></section>
+      <section class="warning-box" data-upload-issues="warnings" hidden><h3>普通提醒</h3><ul></ul><label><input type="checkbox" data-upload-warning-ack> 我已核对提醒，仍继续上传</label></section>
+      <details class="quality-results"><summary>按文件查看检测结果</summary><ul data-upload-photo-results></ul></details>
+    </section>
     <div class="submit-bar"><span>提交后只能凭本次生成的修改凭证查看结果</span><div class="submit-actions"><div class="upload-progress" id="upload-progress"><span></span></div><span class="upload-progress-text" id="upload-progress-text" aria-live="polite"></span><button class="button ghost" type="button" id="upload-retry" hidden>仅重试失败部分</button><button class="button primary" type="submit" id="submit-button">检查并提交 <span>→</span></button></div></div>
   </form>
 </main>
 <button class="photo-guide-float" id="photo-guide-open" type="button" aria-label="打开拍摄示例">拍摄示例</button>
 <div class="photo-modal" id="photo-modal" hidden><div class="photo-modal-backdrop" data-photo-close></div><div class="photo-modal-dialog" role="dialog" aria-modal="true" aria-label="照片拍摄示例"><button class="photo-modal-close" type="button" data-photo-close aria-label="关闭拍摄示例">×</button><div class="photo-modal-heading"><span class="kicker">照片拍摄示例</span><strong>正脸 · 清晰 · 单人</strong></div><div class="photo-guide-choice-grid"><button class="photo-guide-choice photo-zoom-trigger" type="button" data-photo="{% static 'images/photo-guide-girl.png' %}" data-caption="女生版拍摄示例">女生版</button><button class="photo-guide-choice photo-zoom-trigger" type="button" data-photo="{% static 'images/photo-guide-boy.png' %}" data-caption="男生版拍摄示例">男生版</button></div><img id="photo-modal-image" src="{% static 'images/photo-guide-girl.png' %}" alt="女生版拍摄示例"><p id="photo-modal-caption">女生版拍摄示例</p><div class="photo-rule-grid"><div><strong>合格照片</strong><p>简单背景；正脸平视；表情自然；镜片无反光；面部光照均匀；脸部区域建议不低于 128×128 像素。</p></div><div><strong>容易无法识别</strong><p>低头、抬头、偏头、侧脸、打电话、模糊、太暗、过度修图、多人合照、分辨率太低、面部不完整或被遮挡。</p></div></div></div></div>
 {% endblock %}
-{% block scripts %}<script src="{% static 'js/app.js' %}?v=20261103-12"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'js/app.js' %}?v=20261112-1"></script>{% endblock %}

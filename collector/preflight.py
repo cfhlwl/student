@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from openpyxl import load_workbook
 from PIL import Image, UnidentifiedImageError
 
-from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, quality_issue_level
+from .photo_quality import PhotoQualityPolicy, assess_photo_quality, quality_issue_level
 
 
 DEPARTMENTS = {"初中部", "高中部"}
@@ -159,6 +159,7 @@ def run_preflight(
     photo_uploads: Iterable[Any] | None = None,
     *,
     limits: PreflightLimits | None = None,
+    quality_policy: PhotoQualityPolicy | None = None,
 ) -> PreflightResult:
     """Validate a roster and selected photos without creating upload state.
 
@@ -170,7 +171,9 @@ def run_preflight(
     result = PreflightResult()
     limits = limits or PreflightLimits.from_settings()
     result.records = _read_roster(roster_upload, result)
-    result.photos = _read_photos(photo_uploads or [], result, limits)
+    # The HTTP view supplies the database policy explicitly. Keeping the pure
+    # function default off also makes non-HTTP callers safe and predictable.
+    result.photos = _read_photos(photo_uploads or [], result, limits, quality_policy or PhotoQualityPolicy())
     _resolve_photo_matches(result)
     return result
 
@@ -312,7 +315,12 @@ def _read_roster(upload: Any, result: PreflightResult) -> list[PreflightStudent]
     return records
 
 
-def _read_photos(uploads: Iterable[Any], result: PreflightResult, limits: PreflightLimits) -> list[PreflightPhoto]:
+def _read_photos(
+    uploads: Iterable[Any],
+    result: PreflightResult,
+    limits: PreflightLimits,
+    quality_policy: PhotoQualityPolicy,
+) -> list[PreflightPhoto]:
     uploads = list(uploads)
     if len(uploads) > limits.max_photo_count:
         _add_issue(result, code="photo_count_too_large", message=f"照片数量不能超过 {limits.max_photo_count} 张", level="error")
@@ -343,13 +351,11 @@ def _read_photos(uploads: Iterable[Any], result: PreflightResult, limits: Prefli
             _rewind(upload)
             digest = _sha256(upload)
             status = "valid"
-            quality = assess_photo_quality(upload)
-            if quality.status != "passed":
-                try:
-                    level = quality_issue_level(quality)
-                except PhotoQualityPolicyError as exc:
-                    _add_issue(result, code="quality_policy_unavailable", message=str(exc), level="error", filename=filename)
-                else:
+            quality = None
+            if quality_policy.detection_enabled:
+                quality = assess_photo_quality(upload)
+                if quality.status != "passed":
+                    level = "error" if quality_policy.blocking_enabled else "warning"
                     _add_issue(result, code=quality.code, message=f"照片 {filename}：{quality.message}", level=level, filename=filename)
         except (UnidentifiedImageError, OSError, ValueError, EOFError):
             _add_issue(result, code="invalid_photo", message=f"照片 {filename} 损坏或无法读取", level="error", filename=filename)

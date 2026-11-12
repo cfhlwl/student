@@ -372,7 +372,7 @@ def _quality_policy_for_write():
 def _validate_photo_quality(prepared):
     """Run the expensive check before the collection write gate is acquired."""
     policy = _quality_policy_for_write()
-    if not policy.enabled:
+    if not policy.detection_enabled:
         return []
     evidence = []
     for item in prepared:
@@ -386,12 +386,13 @@ def _validate_photo_quality(prepared):
         finally:
             if close_source:
                 source.close()
-        if not quality.passed:
+        if policy.blocking_enabled and not quality.passed:
             raise ValidationError(f"照片 {item.original_name} 未通过人脸质量检查：{quality.message}")
         evidence.append({
             "sha256": item.sha256,
             "policy_version": policy.version,
-            "blocking_enabled": True,
+            "detection_enabled": True,
+            "blocking_enabled": policy.blocking_enabled,
             "quality": quality.as_dict(),
         })
     return evidence
@@ -400,7 +401,7 @@ def _validate_photo_quality(prepared):
 def _assert_quality_evidence(prepared, evidence):
     """Re-check the binding under the write gate without running OpenCV there."""
     policy = _quality_policy_for_write()
-    if not policy.enabled:
+    if not policy.detection_enabled:
         return
     if len(evidence or []) != len(prepared):
         raise ValidationError("照片质量检查凭证缺失，请重新提交")
@@ -408,10 +409,12 @@ def _assert_quality_evidence(prepared, evidence):
         if (
             proof.get("sha256") != item.sha256
             or proof.get("policy_version") != policy.version
-            or proof.get("blocking_enabled") is not True
-            or not proof.get("quality", {}).get("status") == "passed"
+            or proof.get("detection_enabled") is not True
+            or proof.get("blocking_enabled") is not policy.blocking_enabled
         ):
             raise ValidationError("照片质量检查凭证已失效，请重新提交")
+        if policy.blocking_enabled and proof.get("quality", {}).get("status") != "passed":
+            raise ValidationError("照片质量检查凭证未通过强制拦截，请重新提交")
         if item.stored_name:
             digest = hashlib.sha256()
             total = 0
@@ -1167,7 +1170,7 @@ def _mark_upload_session_completed(session_id, submission):
 def _validate_staged_photo_quality(*, session_id, token, manifest_digest=None, roster_fingerprint=None):
     """Perform the authoritative expensive check before the write gate."""
     policy = _quality_policy_for_write()
-    if not policy.enabled:
+    if not policy.detection_enabled:
         return []
     session = _with_db_retry(lambda: UploadSession.objects.get(pk=session_id))
     _check_upload_token(session, token)
