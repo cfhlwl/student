@@ -31,6 +31,34 @@ def client_ip(request):
     return request.META.get("REMOTE_ADDR")
 
 
+def _public_submission_activity():
+    """Return privacy-safe, de-duplicated class activity for the public page."""
+    uploaded = []
+    approved = []
+    seen_class_ids = set()
+    seen_uploaded_labels = set()
+    seen_approved_labels = set()
+    submissions = Submission.objects.select_related("class_group").order_by("-submitted_at", "-id")
+    for submission in submissions:
+        if submission.class_group_id in seen_class_ids:
+            continue
+        seen_class_ids.add(submission.class_group_id)
+        if submission.status == "rejected":
+            continue
+
+        class_name = str(submission.class_group.name).strip()
+        class_label = f"{submission.grade}{class_name}"
+        if not class_label.endswith("班"):
+            class_label += "班"
+        if class_label not in seen_uploaded_labels:
+            seen_uploaded_labels.add(class_label)
+            uploaded.append(f"{class_label}上传了资料")
+        if submission.status == "approved" and class_label not in seen_approved_labels:
+            seen_approved_labels.add(class_label)
+            approved.append(f"{class_label}的资料已经审核")
+    return {"uploaded": uploaded[:10], "approved": approved[:10]}
+
+
 class TemporaryZipResponse(FileResponse):
     def __init__(self, path, *args, **kwargs):
         self._temporary_path = Path(path)
@@ -67,7 +95,13 @@ def public_submit(request):
                 return render(request, "collector/submit_success.html", {"submission": submission, "token": token, "matched_count": submission.students.filter(match_status="matched").count(), "missing_count": submission.students.exclude(match_status="matched").count(), "result_url": result_url})
     else:
         form = SubmissionForm()
-    return render(request, "collector/submit.html", {"form": form, "show_reselect_notice": request.GET.get("from") == "preflight"})
+    submission_activity = _public_submission_activity()
+    return render(request, "collector/submit.html", {
+        "form": form,
+        "show_reselect_notice": request.GET.get("from") == "preflight",
+        "submission_activity_uploaded": submission_activity["uploaded"],
+        "submission_activity_approved": submission_activity["approved"],
+    })
 
 
 @require_GET
