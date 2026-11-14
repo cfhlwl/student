@@ -1,0 +1,133 @@
+.public-notice-ticker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(54vw, 620px);
+  min-width: 260px;
+  padding: 7px 12px;
+  border: 1px solid #f1d39b;
+  border-radius: 999px;
+  background: #fffaf0;
+  color: #8a5b16;
+}
+
+.public-notice-label {
+  flex: 0 0 auto;
+  padding-right: 10px;
+  border-right: 1px solid #ecd29f;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.public-notice-viewport {
+  min-width: 0;
+  min-height: 20px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.public-notice-item {
+  margin: 0;
+  overflow: hidden;
+  color: #6d4b1c;
+  font-size: 12px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(5px);
+  transition: opacity .35s ease, transform .35s ease;
+}
+
+.public-notice-item.is-active {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.public-notice-item[hidden] {
+  display: none;
+}
+
+.resubmission-notice-control {
+  position: relative;
+}
+
+.resubmission-notice-control summary {
+  list-style: none;
+}
+
+.resubmission-notice-control summary::-webkit-details-marker {
+  display: none;
+}
+
+.resubmission-notice-form {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 250px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--white);
+  box-shadow: var(--shadow);
+}
+
+.resubmission-notice-form label {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.resubmission-notice-form select,
+.resubmission-notice-form input {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--white);
+  font: inherit;
+  font-size: 12px;
+}
+
+.resubmission-notice-form .button {
+  width: 100%;
+  margin-top: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .public-notice-item {
+    transition: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .topbar {
+    gap: 8px;
+  }
+
+  .brand {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .public-notice-ticker {
+    width: auto;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 6px 9px;
+  }
+
+  .public-notice-label {
+    display: none;
+  }
+
+  .public-notice-item {
+    font-size: 11px;
+  }
+}

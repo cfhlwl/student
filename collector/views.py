@@ -19,11 +19,11 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .backup import BackupError, clear_collection_safely
 from .maintenance import MaintenanceError, collection_maintenance_gate, collection_write_gate, public_upload_is_open, read_state, write_state
-from .forms import ExportFilterForm, NamingRuleForm, SubmissionForm
-from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
+from .forms import ExportFilterForm, NamingRuleForm, ResubmissionNoticeForm, SubmissionForm
+from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
 from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, face_quality_detection_enabled, read_face_quality_policy
 from .preflight import run_preflight
-from .services import ValidationError, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
+from .services import ValidationError, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, send_resubmission_notice, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 from .statistics import build_admin_statistics_context, build_exception_workbook
 
 
@@ -57,6 +57,25 @@ def _public_submission_activity():
             seen_approved_labels.add(class_label)
             approved.append(f"{class_label}的资料已经审核")
     return {"uploaded": uploaded[:10], "approved": approved[:10]}
+
+
+def _public_resubmission_notices():
+    notices = []
+    seen_labels = set()
+    queryset = ResubmissionNotice.objects.filter(
+        is_active=True,
+        submission__status="rejected",
+    ).select_related("submission__class_group").order_by("-sent_at")
+    for notice in queryset:
+        class_name = str(notice.submission.class_group.name).strip()
+        class_label = f"{notice.submission.grade}{class_name}"
+        if not class_label.endswith("班"):
+            class_label += "班"
+        if class_label in seen_labels:
+            continue
+        seen_labels.add(class_label)
+        notices.append(f"{class_label} {notice.reason}，请重新上传照片！")
+    return notices[:10]
 
 
 class TemporaryZipResponse(FileResponse):
@@ -101,6 +120,7 @@ def public_submit(request):
         "show_reselect_notice": request.GET.get("from") == "preflight",
         "submission_activity_uploaded": submission_activity["uploaded"],
         "submission_activity_approved": submission_activity["approved"],
+        "resubmission_notices": _public_resubmission_notices(),
     })
 
 
@@ -354,7 +374,11 @@ def admin_submissions(request):
     submissions = Submission.objects.select_related("class_group", "school_year", "reviewed_by").all()
     if request.GET.get("status"): submissions = submissions.filter(status=request.GET["status"])
     supplements = PhotoSupplement.objects.filter(status="pending").select_related("submission", "submission__class_group").prefetch_related("photos", "photos__student")
-    return render(request, "collector/admin_submissions.html", {"submissions": submissions, "supplements": supplements})
+    return render(request, "collector/admin_submissions.html", {
+        "submissions": submissions,
+        "supplements": supplements,
+        "resubmission_reason_choices": RESUBMISSION_REASON_CHOICES,
+    })
 
 
 @staff_required
@@ -423,6 +447,30 @@ def review_submission(request, submission_id):
         except Submission.DoesNotExist:
             raise Http404
         messages.success(request, "提交版本已" + ("采用" if action == "approved" else "退回") + "。")
+    return redirect("admin-submissions")
+
+
+@require_POST
+@staff_required
+def notify_resubmission(request, submission_id):
+    form = ResubmissionNoticeForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "通知原因填写不完整，请选择预设原因或填写自定义原因。")
+        return redirect("admin-submissions")
+    try:
+        send_resubmission_notice(
+            submission_id=submission_id,
+            reason_code=form.cleaned_data["reason_code"],
+            reason=form.cleaned_data["reason"],
+            actor=request.user,
+            ip_address=client_ip(request),
+        )
+    except Submission.DoesNotExist:
+        raise Http404
+    except ValidationError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "已发送重传通知，首页将显示该班级的重传提醒。")
     return redirect("admin-submissions")
 
 

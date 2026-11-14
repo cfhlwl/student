@@ -4,7 +4,7 @@ from .password_views import admin_password_change
 
 from .views import (
     StaffLoginView, StaffLogoutView, admin_classes, admin_dashboard, admin_naming, admin_statistics, admin_statistics_exceptions, admin_students,
-    admin_submissions, clear_test_data, download_template, export_zip, manual_match, manual_supplement_match, protected_document, protected_photo, public_submit, review_submission, review_supplement, submission_preview, submit_preflight, submit_preflight_page, submit_result, submit_supplement, toggle_photo_quality, toggle_photo_quality_detection, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start, upload_status,
+    admin_submissions, clear_test_data, download_template, export_zip, manual_match, manual_supplement_match, notify_resubmission, protected_document, protected_photo, public_submit, review_submission, review_supplement, submission_preview, submit_preflight, submit_preflight_page, submit_result, submit_supplement, toggle_photo_quality, toggle_photo_quality_detection, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start, upload_status,
 )
 
 urlpatterns = [
@@ -28,6 +28,7 @@ urlpatterns = [
     path("admin/submissions/", admin_submissions, name="admin-submissions"),
     path("admin/submissions/<uuid:submission_id>/preview/", submission_preview, name="submission-preview"),
     path("admin/submissions/<uuid:submission_id>/review/", review_submission, name="review-submission"),
+    path("admin/submissions/<uuid:submission_id>/notify-resubmission/", notify_resubmission, name="notify-resubmission"),
     path("admin/supplements/<uuid:supplement_id>/review/", review_supplement, name="review-supplement"),
     path("admin/students/", admin_students, name="admin-students"),
     path("admin/students/photos/<int:photo_id>/match/", manual_match, name="manual-match"),

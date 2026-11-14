@@ -26,7 +26,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from PIL import Image, UnidentifiedImageError
 
-from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
+from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
 from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
 
@@ -655,6 +655,10 @@ def _create_submission_records(*, records, roster_name, roster_candidate, photo_
                 documents = [SubmissionDocument(submission=submission, original_name=candidate.original_name, file=candidate.stored_name, content_type=candidate.content_type, size=candidate.size) for candidate in document_inputs]
                 if documents:
                     SubmissionDocument.objects.bulk_create(documents)
+                ResubmissionNotice.objects.filter(
+                    submission__class_group=class_group,
+                    is_active=True,
+                ).update(is_active=False, resolved_at=timezone.now())
                 AuditLog.objects.create(action="public_submit", target_type="Submission", target_id=str(submission.id), detail={"student_count": len(records)}, ip_address=ip_address)
 
         _with_db_retry(create_files_and_audit)
@@ -1318,6 +1322,43 @@ def review_submission_version(*, submission_id, action, actor, ip_address=None):
             submission.save(update_fields=["status", "reviewed_at", "reviewed_by"])
             AuditLog.objects.create(actor=actor, action=f"submission_{action}", target_type="Submission", target_id=str(submission.id), ip_address=ip_address)
             return submission
+
+    return _with_db_retry(operation)
+
+
+@collection_write_required
+def send_resubmission_notice(*, submission_id, reason_code, reason, actor, ip_address=None):
+    valid_codes = {value for value, _ in RESUBMISSION_REASON_CHOICES}
+    if reason_code not in valid_codes or not reason or not reason.strip():
+        raise ValidationError("重传通知原因不正确")
+
+    def operation():
+        with transaction.atomic():
+            submission = Submission.objects.select_for_update().get(pk=submission_id)
+            if submission.status != "rejected":
+                raise ValidationError("只有已退回的提交版本可以发送重传通知")
+            latest = Submission.objects.filter(class_group_id=submission.class_group_id).order_by("-submitted_at", "-id").first()
+            if latest is None or latest.pk != submission.pk:
+                raise ValidationError("该班级已有更新提交，请在最新退回版本上发送通知")
+            notice, _ = ResubmissionNotice.objects.update_or_create(
+                submission=submission,
+                defaults={
+                    "reason_code": reason_code,
+                    "reason": reason.strip()[:200],
+                    "sent_by": actor,
+                    "is_active": True,
+                    "resolved_at": None,
+                },
+            )
+            AuditLog.objects.create(
+                actor=actor,
+                action="resubmission_notice_sent",
+                target_type="Submission",
+                target_id=str(submission.id),
+                detail={"reason_code": reason_code, "reason": notice.reason},
+                ip_address=ip_address,
+            )
+            return notice
 
     return _with_db_retry(operation)
 

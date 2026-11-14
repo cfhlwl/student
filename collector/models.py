@@ -76,6 +76,31 @@ class Submission(models.Model):
         return f"{self.class_group} / {self.id}"
 
 
+RESUBMISSION_REASON_CHOICES = [
+    ("photo_unclear", "照片不清晰"),
+    ("face_too_small", "人脸尺寸过小"),
+    ("exposure", "照片亮度或曝光不合格"),
+    ("obstruction", "面部存在遮挡或明显侧脸"),
+    ("photo_mismatch", "照片与学生不匹配"),
+    ("missing_photo", "缺少照片"),
+    ("custom", "自定义原因"),
+]
+
+
+class ResubmissionNotice(models.Model):
+    submission = models.OneToOneField(Submission, on_delete=models.CASCADE, related_name="resubmission_notice")
+    reason_code = models.CharField(max_length=32, choices=RESUBMISSION_REASON_CHOICES)
+    reason = models.CharField(max_length=200)
+    sent_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="sent_resubmission_notices")
+    sent_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-sent_at"]
+        indexes = [models.Index(fields=["is_active", "-sent_at"], name="notice_active_sent_idx")]
+
+
 class Student(models.Model):
     GENDERS = [("男", "男"), ("女", "女")]
     STUDY_TYPES = [("走读", "走读"), ("半走读", "半走读"), ("住宿", "住宿")]

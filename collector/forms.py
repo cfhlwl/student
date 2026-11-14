@@ -1,5 +1,7 @@
 from django import forms
 
+from .models import RESUBMISSION_REASON_CHOICES
+
 
 class MultipleFileInput(forms.FileInput):
     allow_multiple_selected = True
@@ -28,6 +30,24 @@ class SubmissionForm(forms.Form):
         if not upload.name.lower().endswith(".xlsx"):
             raise forms.ValidationError("名单必须是 .xlsx 文件")
         return upload
+
+
+class ResubmissionNoticeForm(forms.Form):
+    reason_code = forms.ChoiceField(choices=RESUBMISSION_REASON_CHOICES, label="通知原因")
+    custom_reason = forms.CharField(required=False, max_length=180, label="自定义原因")
+
+    def clean(self):
+        cleaned = super().clean()
+        reason_code = cleaned.get("reason_code")
+        custom_reason = (cleaned.get("custom_reason") or "").strip()
+        if reason_code == "custom":
+            if not custom_reason:
+                self.add_error("custom_reason", "请选择或填写通知原因")
+            else:
+                cleaned["reason"] = custom_reason
+        elif reason_code:
+            cleaned["reason"] = dict(RESUBMISSION_REASON_CHOICES)[reason_code]
+        return cleaned
 
 
 class NamingRuleForm(forms.Form):
