@@ -65,13 +65,13 @@ def test_public_home_activity_template_is_progressive_and_cache_versioned(client
 
     assert response.status_code == 200
     assert "submission_activity.css?v=20261113-1" in body
-    assert "submission_activity.js?v=20261116-1" not in body
+    assert "submission_activity.js?v=20261116-2" not in body
 
     school_year = SchoolYear.objects.create(name="2026")
     class_group = ClassGroup.objects.create(department="high", school_year=school_year, grade="高一", name="1")
     make_submission(class_group, "pending", "template-check")
     body = client.get(reverse("submit")).content.decode()
-    assert "submission_activity.js?v=20261116-1" in body
+    assert "submission_activity.js?v=20261116-2" in body
     assert "data-submission-activity" in body
 
 

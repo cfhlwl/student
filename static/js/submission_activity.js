@@ -2,12 +2,18 @@
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   document.querySelectorAll("[data-submission-activity]").forEach((viewport) => {
+    const isNoticeTicker = viewport.hasAttribute("data-notice-ticker");
+    if (isNoticeTicker) {
+      if (reducedMotion) viewport.querySelector(".public-notice-track")?.style.setProperty("animation", "none");
+      return;
+    }
+
     const items = Array.from(viewport.querySelectorAll("[data-submission-activity-item]"));
     if (items.length < 2) return;
 
     let current = 0;
     let timer = null;
-    const interval = viewport.hasAttribute("data-notice-ticker") ? 12000 : 4500;
+    const interval = 4500;
 
     const showNext = () => {
       const previous = items[current];
