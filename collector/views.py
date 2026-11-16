@@ -604,20 +604,24 @@ def export_zip(request):
 @staff_required
 def admin_naming(request):
     rule = NamingRule.objects.first() or NamingRule()
+    export_layout = AppSetting.get_value("export_layout", "by_class")
     if request.method == "POST":
         form = NamingRuleForm(request.POST)
         if form.is_valid():
             try:
                 with collection_write_gate():
-                    rule = NamingRule.objects.first() or NamingRule()
-                    rule.mode = form.cleaned_data["mode"]
-                    rule.template = form.cleaned_data["template"]
-                    rule.male_code = form.cleaned_data["male_code"]
-                    rule.female_code = form.cleaned_data["female_code"]
-                    rule.separator = form.cleaned_data["separator"]
-                    validate_naming_rule(rule)
-                    rule.updated_by = request.user
-                    rule.save()
+                    with transaction.atomic():
+                        rule = NamingRule.objects.first() or NamingRule()
+                        rule.mode = form.cleaned_data["mode"]
+                        rule.template = form.cleaned_data["template"]
+                        rule.male_code = form.cleaned_data["male_code"]
+                        rule.female_code = form.cleaned_data["female_code"]
+                        rule.separator = form.cleaned_data["separator"]
+                        validate_naming_rule(rule)
+                        rule.updated_by = request.user
+                        rule.save()
+                        export_layout = form.cleaned_data.get("export_layout") or "by_class"
+                        AppSetting.set_value("export_layout", export_layout)
             except ValidationError as exc:
                 form.add_error("template", str(exc))
             except MaintenanceError as exc:
@@ -626,8 +630,8 @@ def admin_naming(request):
                 messages.success(request, "照片命名规则已保存。")
                 return redirect("admin-naming")
     else:
-        form = NamingRuleForm(initial={"mode": rule.mode, "template": rule.template, "male_code": rule.male_code, "female_code": rule.female_code, "separator": rule.separator})
-    return render(request, "collector/admin_naming.html", {"form": form, "rule": rule})
+        form = NamingRuleForm(initial={"mode": rule.mode, "template": rule.template, "male_code": rule.male_code, "female_code": rule.female_code, "separator": rule.separator, "export_layout": export_layout})
+    return render(request, "collector/admin_naming.html", {"form": form, "rule": rule, "export_layout": export_layout})
 
 
 @require_POST

@@ -58,6 +58,16 @@ class NamingRuleForm(forms.Form):
     male_code = forms.CharField(max_length=10, label="男生编号", initial="01")
     female_code = forms.CharField(max_length=10, label="女生编号", initial="02")
     separator = forms.CharField(max_length=5, required=False, label="性别编号分隔符（模式 B）")
+    export_layout = forms.ChoiceField(
+        required=False,
+        initial="by_class",
+        label="导出目录方式",
+        choices=[
+            ("by_class", "按班级导出：班级文件夹内按就读类型分类"),
+            ("by_study_type", "按就读类型导出：全部班级合并，不分班级文件夹"),
+        ],
+        help_text="导出 ZIP 时生效；照片始终放在对应的走读、半走读或住宿文件夹中。",
+    )
 
 
 class ExportFilterForm(forms.Form):
