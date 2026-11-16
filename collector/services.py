@@ -30,7 +30,8 @@ from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplemen
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
 from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
 
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "MPO"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
 ALLOWED_TOKENS = {"{姓名}", "{性别编号}", "{学部}", "{班级}", "{就读类型}"}
 FIELD_MAP = {
@@ -171,13 +172,13 @@ def image_bytes_info(upload):
         raise ValidationError(f"文件 {upload.name} 超过 {settings.MAX_UPLOAD_SIZE_MB} MB 限制")
     suffix = PurePosixPath(upload.name).suffix.lower()
     if suffix not in ALLOWED_IMAGE_EXTENSIONS:
-        raise ValidationError(f"照片 {upload.name} 不是 JPG/PNG")
+        raise ValidationError(f"照片 {upload.name} 不是 JPG/PNG/MPO")
     upload.seek(0)
     try:
         with Image.open(upload) as image:
             image.verify()
             content_type = Image.MIME.get(image.format)
-            if image.format not in {"JPEG", "PNG"}:
+            if image.format not in ALLOWED_IMAGE_FORMATS:
                 raise ValidationError(f"照片 {upload.name} 的实际格式不受支持")
     except (UnidentifiedImageError, OSError) as exc:
         raise ValidationError(f"照片 {upload.name} 无法读取") from exc

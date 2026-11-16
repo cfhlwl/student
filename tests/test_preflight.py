@@ -32,6 +32,20 @@ def photo_file(name, *, color=(220, 80, 60), broken=False):
     return data
 
 
+def mpo_photo_file(name):
+    data = io.BytesIO()
+    Image.new("RGB", (160, 160), (220, 80, 60)).save(
+        data,
+        format="MPO",
+        save_all=True,
+        append_images=[Image.new("RGB", (160, 160), (80, 120, 220))],
+    )
+    data.seek(0)
+    data.name = name
+    data.size = len(data.getvalue())
+    return data
+
+
 def test_preflight_reports_match_missing_and_same_name_manual_warning(monkeypatch):
     # This is a pure preflight test without a Django database. Policy failure
     # handling is covered separately in the photo-quality service tests.
@@ -120,4 +134,15 @@ def test_preflight_malformed_excel_is_a_blocking_error():
 
     assert result.summary["student_count"] == 0
     assert "invalid_roster" in {issue.code for issue in result.blocking_errors}
+
+
+def test_preflight_accepts_mpo_photo_container():
+    roster = roster_file(
+        ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型"],
+        [["张三", "男", "高中部", "2026", "高一", "1", "走读"]],
+    )
+    result = run_preflight(roster, [mpo_photo_file("张三.jpg")])
+
+    assert not [issue for issue in result.blocking_errors if issue.code in {"invalid_photo", "unsupported_photo_type"}]
+    assert result.photos[0].status != "invalid"
 

@@ -29,7 +29,8 @@ GRADE_BY_YEAR = {
     "2025": {"初中部": "初二", "高中部": "高二"},
     "2026": {"初中部": "初一", "高中部": "高一"},
 }
-PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
+PHOTO_FORMATS = {"JPEG", "PNG", "MPO"}
 REQUIRED_HEADERS = ("姓名", "学部", "学年", "班级", "就读类型")
 
 
@@ -339,14 +340,14 @@ def _read_photos(
         digest = ""
         suffix = PurePosixPath(filename).suffix.lower()
         if suffix not in PHOTO_EXTENSIONS:
-            _add_issue(result, code="unsupported_photo_type", message=f"照片 {filename} 不是 JPG/PNG", level="error", filename=filename)
+            _add_issue(result, code="unsupported_photo_type", message=f"照片 {filename} 不是 JPG/PNG/MPO", level="error", filename=filename)
         if size > limits.max_photo_bytes:
             _add_issue(result, code="photo_too_large", message=f"照片 {filename} 超过单文件大小限制", level="error", filename=filename)
         try:
             _rewind(upload)
             with Image.open(upload) as image:
                 image.verify()
-                if image.format not in {"JPEG", "PNG"}:
+                if image.format not in PHOTO_FORMATS:
                     raise ValueError("unsupported image format")
             _rewind(upload)
             digest = _sha256(upload)

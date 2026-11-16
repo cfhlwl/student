@@ -30,6 +30,17 @@ def photo_upload():
     return SimpleUploadedFile("测试学生.jpg", data.getvalue(), content_type="image/jpeg")
 
 
+def mpo_upload():
+    data = io.BytesIO()
+    Image.new("RGB", (180, 180), (120, 120, 120)).save(
+        data,
+        format="MPO",
+        save_all=True,
+        append_images=[Image.new("RGB", (180, 180), (130, 130, 130))],
+    )
+    return SimpleUploadedFile("测试学生.jpg", data.getvalue(), content_type="image/jpeg")
+
+
 def synthetic_photos(count):
     photos = []
     for index in range(count):
@@ -73,6 +84,19 @@ def test_detection_master_off_skips_opencv_and_quality_warnings(monkeypatch):
     assert calls["count"] == 0
     assert not result.warnings
     assert result.photos[0].quality_status == "not_checked"
+
+
+@pytest.mark.django_db
+def test_detection_master_off_accepts_mpo_without_running_quality_detection():
+    AppSetting.objects.all().delete()
+    upload = mpo_upload()
+    result = preflight.run_preflight(roster_upload(), [upload], quality_policy=read_face_quality_policy())
+
+    assert not result.blocking_errors
+    assert result.photos[0].status != "invalid"
+    content_type, digest = services.image_bytes_info(upload)
+    assert content_type == "image/mpo"
+    assert len(digest) == 64
 
 
 @pytest.mark.django_db
