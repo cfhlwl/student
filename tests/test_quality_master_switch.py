@@ -215,3 +215,10 @@ def test_upload_ui_has_singleflight_progress_and_identity_bound_ack():
     assert "正在预检查第 " in app
     assert "preflightIdentity" in app
     assert "ack.checked = false" in app
+
+
+def test_upload_quality_warnings_are_inline_and_non_blocking():
+    app = Path("static/js/app.js").read_text(encoding="utf-8")
+    assert "data-upload-warning-ack" in Path("templates/collector/submit.html").read_text(encoding="utf-8")
+    assert "请先在页面中核对预检查提醒，再勾选确认继续上传" not in app
+    assert "上传前预检查未通过，请按页面中的阻断错误修改后重新检测" in app

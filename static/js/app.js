@@ -211,7 +211,6 @@ document.addEventListener('DOMContentLoaded', function () {
       const preflightIdentity = await textFingerprint(JSON.stringify({inputKey: inputKey, photos: preflight.photos, blocking_errors: preflight.blocking_errors, warnings: preflight.warnings}));
       renderUploadPreflight(preflight, preflightIdentity);
       if (preflight.blocking_errors.length) { const error = new Error('上传前预检查未通过，请按页面中的阻断错误修改后重新检测'); error.preflightRendered = true; throw error; }
-      if (preflight.warnings.length && !submitForm.querySelector('[data-upload-warning-ack]')?.checked) { const error = new Error('请先在页面中核对预检查提醒，再勾选确认继续上传'); error.preflightRendered = true; throw error; }
       let state = window.__studentUploadState;
       try { if (!state) state = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); } catch (error) { state = null; }
       if (state && (state.inputKey !== inputKey || !state.idempotencyKey)) { clearPersisted(); state = null; }
