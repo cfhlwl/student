@@ -97,3 +97,38 @@ def test_notice_styles_and_public_ticker_are_cache_versioned(client):
     assert "data-submission-activity" in body
     assert "public-notice-track" in body
     assert body.count("public-notice-group") == 2
+    assert "上传前预检查" not in body
+    assert "下载 Excel 模板 ↗" in body
+
+
+@pytest.mark.django_db
+def test_public_ticker_separates_multiple_notices(client):
+    first = rejected_submission()
+    ResubmissionNotice.objects.create(
+        submission=first,
+        reason_code="photo_unclear",
+        reason="照片不清晰",
+    )
+    second_group = ClassGroup.objects.create(
+        department="high",
+        school_year=first.school_year,
+        grade="高二",
+        name="8",
+    )
+    second = Submission.objects.create(
+        access_token_hash=hashlib.sha256(b"notice-second").hexdigest(),
+        department="high",
+        school_year=first.school_year,
+        grade="高二",
+        class_group=second_group,
+        status="rejected",
+        source_filename="名单2.xlsx",
+    )
+    ResubmissionNotice.objects.create(
+        submission=second,
+        reason_code="missing_photo",
+        reason="缺少照片",
+    )
+
+    body = client.get(reverse("submit")).content.decode()
+    assert body.count("public-notice-separator") == 2

@@ -55,6 +55,14 @@
   white-space: nowrap;
 }
 
+.public-notice-separator {
+  flex: 0 0 auto;
+  color: #d4a957;
+  font-size: 12px;
+  line-height: 20px;
+  opacity: .85;
+}
+
 @keyframes public-notice-right-to-left {
   from { transform: translateX(0); }
   to { transform: translateX(-50%); }
