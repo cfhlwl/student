@@ -3,9 +3,11 @@ import io
 import pytest
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.urls import reverse
 from openpyxl import load_workbook
 
 from collector.models import AppSetting, ClassGroup, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument
+from collector.maintenance import write_state
 from collector.statistics import build_admin_statistics_context, build_exception_workbook
 
 
@@ -89,6 +91,42 @@ def test_statistics_filters_by_scope_and_status_without_cross_class_data():
     pending = build_admin_statistics_context({"school_year": "2026", "status": "pending"})
     assert [row["class_name"] for row in pending["rows"]] == ["2"]
     assert pending["rows"][0]["student_names"] == []
+
+
+@pytest.mark.django_db
+def test_statistics_separates_uploaded_and_not_uploaded_classes():
+    _submission(_scope("2026", name="1"), "pending", ["待审学生"])
+    _submission(_scope("2026", name="2"), "rejected", ["退回学生"])
+    _submission(_scope("2026", name="3"), "approved", ["已采用学生"])
+    _scope("2026", name="4")
+
+    context = build_admin_statistics_context()
+
+    assert {row["class_name"] for row in context["uploaded_rows"]} == {"1", "2", "3"}
+    assert {row["class_name"] for row in context["not_uploaded_rows"]} == {"4"}
+    assert context["totals"]["uploaded_class_count"] == 3
+    assert context["totals"]["not_uploaded_class_count"] == 1
+
+
+@pytest.mark.django_db
+def test_admin_can_initialize_and_resize_default_class_list(client):
+    admin = User.objects.create_user(username="class-list-admin", password="password-123456", is_staff=True)
+    client.force_login(admin)
+    write_state("open")
+    payload = {"action": "initialize_default_classes", "school_year": "2026"}
+    for field in ("count_middle_1", "count_middle_2", "count_middle_3"):
+        payload[field] = "6"
+    for field in ("count_high_1", "count_high_2", "count_high_3"):
+        payload[field] = "13"
+    response = client.post(reverse("admin-classes"), payload)
+    assert response.status_code == 302
+    assert ClassGroup.objects.filter(school_year__name="2026", department="middle", name__in=[str(i) for i in range(1, 7)], is_active=True).count() == 18
+    assert ClassGroup.objects.filter(school_year__name="2026", department="high", name__in=[str(i) for i in range(1, 14)], is_active=True).count() == 39
+
+    payload["count_high_1"] = "12"
+    response = client.post(reverse("admin-classes"), payload)
+    assert response.status_code == 302
+    assert ClassGroup.objects.get(school_year__name="2026", department="high", grade="高一", name="13").is_active is False
 
 
 @pytest.mark.django_db

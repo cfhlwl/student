@@ -7,6 +7,7 @@
 
     let current = 0;
     let timer = null;
+    const interval = viewport.hasAttribute("data-notice-ticker") ? 12000 : 4500;
 
     const showNext = () => {
       const previous = items[current];
@@ -31,7 +32,7 @@
     };
 
     const start = () => {
-      if (!timer && !document.hidden) timer = window.setInterval(showNext, 4500);
+      if (!timer && !document.hidden) timer = window.setInterval(showNext, interval);
     };
 
     const stop = () => {

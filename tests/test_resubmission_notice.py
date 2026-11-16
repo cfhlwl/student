@@ -92,6 +92,6 @@ def test_notice_styles_and_public_ticker_are_cache_versioned(client):
     assert notice.is_active
 
     body = client.get(reverse("submit")).content.decode()
-    assert "resubmission_notice.css?v=20261114-1" in body
-    assert "submission_activity.js?v=20261113-2" in body
+    assert "resubmission_notice.css?v=20261116-1" in body
+    assert "submission_activity.js?v=20261116-1" in body
     assert "data-submission-activity" in body

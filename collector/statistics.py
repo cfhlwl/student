@@ -180,6 +180,8 @@ def build_admin_statistics_context(filters=None):
     rows.sort(key=lambda row: (row["school_year"], row["department"], row["grade"], row["class_name"]))
     totals = {
         "scope_count": len(rows),
+        "uploaded_class_count": sum(row["status"] != "none" for row in rows),
+        "not_uploaded_class_count": sum(row["status"] == "none" for row in rows),
         "adopted_scope_count": sum(row["status"] == "approved" for row in rows),
         "student_count": sum(row["student_count"] for row in rows),
         "matched_photo_count": sum(row["matched_photo_count"] for row in rows),
@@ -192,6 +194,8 @@ def build_admin_statistics_context(filters=None):
     return {
         "filters": values,
         "rows": rows,
+        "uploaded_rows": [row for row in rows if row["status"] != "none"],
+        "not_uploaded_rows": [row for row in rows if row["status"] == "none"],
         "totals": totals,
         "coverage": _coverage(totals["student_count"]),
         "status_choices": [(key, label) for key, label in STATUSES.items()],

@@ -335,6 +335,10 @@ class StaffLogoutView(LogoutView):
 def admin_dashboard(request):
     students = Student.objects.filter(submission__status="approved")
     class_stats = ClassGroup.objects.filter(is_active=True).annotate(
+        submission_count=Count("submissions", distinct=True),
+        approved_submission_count=Count("submissions", filter=Q(submissions__status="approved"), distinct=True),
+        pending_submission_count=Count("submissions", filter=Q(submissions__status="pending"), distinct=True),
+        rejected_submission_count=Count("submissions", filter=Q(submissions__status="rejected"), distinct=True),
         student_count=Count("submissions__students", filter=Q(submissions__status="approved"), distinct=True),
         photo_count=Count("submissions__students__photo", filter=Q(submissions__status="approved", submissions__students__match_status="matched"), distinct=True),
     )
@@ -342,7 +346,10 @@ def admin_dashboard(request):
         "student_count": students.count(), "photo_count": students.filter(match_status="matched").count(),
         "missing_count": students.exclude(match_status="matched").count(), "pending_count": Submission.objects.filter(status="pending").count(),
         "rejected_count": Submission.objects.filter(status="rejected").count(),
-        "class_stats": class_stats, "upload_open": public_upload_is_open(),
+        "class_stats": class_stats,
+        "uploaded_class_count": class_stats.filter(submission_count__gt=0).count(),
+        "not_uploaded_class_count": class_stats.filter(submission_count=0).count(),
+        "upload_open": public_upload_is_open(),
         "photo_quality_detection": face_quality_detection_enabled(),
         "photo_quality_blocking": face_quality_blocking_enabled(),
     }
@@ -479,6 +486,15 @@ def filter_values(form):
 
 
 ADMIN_STUDENT_PAGE_SIZES = (50, 100, 200)
+
+CLASS_LIST_COUNT_FIELDS = (
+    ("middle", "初一", "count_middle_1", 6),
+    ("middle", "初二", "count_middle_2", 6),
+    ("middle", "初三", "count_middle_3", 6),
+    ("high", "高一", "count_high_1", 13),
+    ("high", "高二", "count_high_2", 13),
+    ("high", "高三", "count_high_3", 13),
+)
 
 
 @staff_required
@@ -721,11 +737,57 @@ def admin_classes(request):
     if request.method == "POST":
         try:
             with collection_write_gate():
-                if request.POST.get("action") == "set_scope":
+                action = request.POST.get("action")
+                if action == "set_scope":
                     scope = request.POST.get("scope", "all")
                     AppSetting.set_value("collection_scope", "configured" if scope == "configured" else "all")
                     AuditLog.objects.create(actor=request.user, action="set_collection_scope", detail={"scope": AppSetting.get_value("collection_scope")}, ip_address=client_ip(request))
                     messages.success(request, "采集范围已切换为" + ("仅已配置班级" if scope == "configured" else "全校全部范围") + "。")
+                    return redirect("admin-classes")
+                if action == "initialize_default_classes":
+                    year_name = request.POST.get("school_year", "").strip()
+                    if not year_name:
+                        messages.error(request, "请先填写学年。")
+                        return redirect("admin-classes")
+                    try:
+                        year_name = normalize_school_year(year_name)
+                        counts = {}
+                        for department, grade, field_name, _default in CLASS_LIST_COUNT_FIELDS:
+                            raw_count = request.POST.get(field_name, "").strip()
+                            count = int(raw_count)
+                            if count < 0 or count > 50:
+                                raise ValueError
+                            counts[(department, grade)] = count
+                    except (ValidationError, TypeError, ValueError):
+                        messages.error(request, "班级数量必须是 0～50 之间的整数。")
+                        return redirect("admin-classes")
+                    year, _ = SchoolYear.objects.get_or_create(name=year_name, defaults={"is_active": True})
+                    created_count = 0
+                    deactivated_count = 0
+                    with transaction.atomic():
+                        for (department, grade), count in counts.items():
+                            existing = ClassGroup.objects.filter(department=department, school_year=year, grade=grade)
+                            for group in existing:
+                                if group.name.isdigit() and int(group.name) > count and not group.submissions.exists() and group.is_active:
+                                    group.is_active = False
+                                    group.save(update_fields=["is_active"])
+                                    deactivated_count += 1
+                            for number in range(1, count + 1):
+                                _, created = ClassGroup.objects.update_or_create(
+                                    department=department,
+                                    school_year=year,
+                                    grade=grade,
+                                    name=str(number),
+                                    defaults={"is_active": True},
+                                )
+                                created_count += int(created)
+                    AuditLog.objects.create(
+                        actor=request.user,
+                        action="initialize_class_list",
+                        detail={"school_year": year_name, "counts": {f"{department}_{grade}": count for (department, grade), count in counts.items()}, "created": created_count, "deactivated": deactivated_count},
+                        ip_address=client_ip(request),
+                    )
+                    messages.success(request, f"已更新 {year_name} 学年班级清单：新增 {created_count} 个，停用 {deactivated_count} 个未提交班级。")
                     return redirect("admin-classes")
                 year_name = request.POST.get("school_year", "").strip()
                 department = request.POST.get("department", "")
@@ -745,5 +807,7 @@ def admin_classes(request):
         except MaintenanceError as exc:
             messages.error(request, str(exc))
             return redirect("admin-classes")
-    return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all(), "collection_scope": AppSetting.get_value("collection_scope", "all")})
+    default_year = SchoolYear.objects.filter(is_active=True).order_by("-name").first()
+    class_count_fields = [{"department": department, "grade": grade, "name": field_name, "default": default} for department, grade, field_name, default in CLASS_LIST_COUNT_FIELDS]
+    return render(request, "collector/admin_classes.html", {"classes": ClassGroup.objects.select_related("school_year"), "years": SchoolYear.objects.all(), "collection_scope": AppSetting.get_value("collection_scope", "all"), "default_school_year": default_year, "class_count_fields": class_count_fields})
 

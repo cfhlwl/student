@@ -19,11 +19,15 @@
   <p class="preview-note">统计只计算每个班级当前有效采用版本；历史版本不会重复计入。名单内照片完成率是已采用名单内部指标。全校覆盖率只有在配置独立的全校应采学生名册或人数后才计算。</p>
 </section>
 <div class="metric-grid">
+  <div class="metric accent"><span>已上传班级</span><strong>{{ totals.uploaded_class_count }}</strong></div>
+  <div class="metric warn"><span>未上传班级</span><strong>{{ totals.not_uploaded_class_count }}</strong></div>
   <div class="metric"><span>名单内学生</span><strong>{{ totals.student_count }}</strong></div>
   <div class="metric accent"><span>已匹配照片</span><strong>{{ totals.matched_photo_count }}</strong></div>
   <div class="metric warn"><span>缺少照片</span><strong>{{ totals.missing_photo_count }}</strong></div>
   <div class="metric"><span>名单内完成率</span><strong>{{ totals.photo_completion_rate }}%</strong></div>
 </div>
+<section class="panel"><div class="panel-heading"><div><span class="kicker">班级上传清单</span><h2>已上传班级</h2></div></div><div class="table-wrap"><table><thead><tr><th>班级</th><th>当前状态</th></tr></thead><tbody>{% for row in uploaded_rows %}<tr><td>{{ row.scope_label }}</td><td>{{ row.status_label }}</td></tr>{% empty %}<tr><td colspan="2" class="empty">当前筛选范围内还没有上传班级。</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="panel"><div class="panel-heading"><div><span class="kicker">班级上传清单</span><h2>未上传班级</h2></div></div><div class="table-wrap"><table><thead><tr><th>班级</th><th>状态</th></tr></thead><tbody>{% for row in not_uploaded_rows %}<tr><td>{{ row.scope_label }}</td><td><span class="status">未上传</span></td></tr>{% empty %}<tr><td colspan="2" class="empty">当前筛选范围内所有班级均已有提交记录。</td></tr>{% endfor %}</tbody></table></div><p class="preview-note">“已上传”包含待审核、已采用和已退回；“未上传”表示当前班级没有任何提交版本。</p></section>
 <section class="panel"><div class="panel-heading"><div><span class="kicker">分层统计</span><h2>学年 / 学部 / 年级 / 班级</h2></div></div><div class="table-wrap"><table><thead><tr><th>范围</th><th>状态</th><th>学生数</th><th>已匹配</th><th>缺照片</th><th>待确认异常</th><th>名单内完成率</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.scope_label }}</td><td>{{ row.status_label }}{% if row.pending_submission_count %}<br><small>另有 {{ row.pending_submission_count }} 个待审提交</small>{% endif %}</td><td>{{ row.student_count }}</td><td>{{ row.matched_photo_count }}</td><td>{{ row.missing_photo_count }}</td><td>{{ row.pending_exception_count }}</td><td>{{ row.photo_completion_rate }}%</td></tr>{% empty %}<tr><td colspan="7" class="empty">没有符合条件的采集范围。</td></tr>{% endfor %}</tbody></table></div></section>
 <section class="panel"><div class="panel-heading"><div><span class="kicker">覆盖率口径</span><h2>全校覆盖率</h2></div></div>{% if coverage.available %}<p>全校应采人数：{{ coverage.expected_count }}；当前有效采用名单人数：{{ coverage.covered_count }}；覆盖率：{{ coverage.rate }}%。</p>{% else %}<p class="preview-note">{{ coverage.reason }}</p>{% endif %}</section>
 {% endblock %}
