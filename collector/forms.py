@@ -54,10 +54,10 @@ class ResubmissionNoticeForm(forms.Form):
 
 class NamingRuleForm(forms.Form):
     mode = forms.ChoiceField(choices=[("name", "模式 A · 仅姓名"), ("gender_no", "模式 B · 姓名 + 性别编号"), ("custom", "模式 C · 自定义字段组合")])
-    template = forms.CharField(max_length=200, label="命名模板", help_text="可用字段：{姓名} {性别编号} {学部} {班级} {就读类型}")
+    template = forms.CharField(max_length=200, label="命名模板", help_text="可用字段：{姓名} {性别编号} {学部} {年级} {班级} {就读类型}；模式 C 可直接在字段之间输入分隔符，例如 {姓名}-{年级}-{班级}", widget=forms.TextInput(attrs={"placeholder": "{姓名}{年级}{班级}"}))
     male_code = forms.CharField(max_length=10, label="男生编号", initial="01")
     female_code = forms.CharField(max_length=10, label="女生编号", initial="02")
-    separator = forms.CharField(max_length=5, required=False, label="姓名与编号分隔符")
+    separator = forms.CharField(max_length=5, required=False, label="性别编号分隔符（模式 B）")
 
 
 class ExportFilterForm(forms.Form):

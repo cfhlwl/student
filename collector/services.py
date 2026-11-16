@@ -33,7 +33,7 @@ from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_f
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "MPO"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
-ALLOWED_TOKENS = {"{姓名}", "{性别编号}", "{学部}", "{班级}", "{就读类型}"}
+ALLOWED_TOKENS = {"{姓名}", "{性别编号}", "{学部}", "{年级}", "{班级}", "{就读类型}"}
 FIELD_MAP = {
     "姓名": "name", "性别": "gender", "学部": "department", "学年": "school_year",
     "班级": "class_name", "就读类型": "study_type",
@@ -1297,8 +1297,8 @@ def validate_naming_rule(rule):
         rule.template = "{姓名}"
     elif rule.mode == "gender_no":
         rule.template = "{姓名}" + rule.separator + "{性别编号}"
-    # Normalize templates saved by older versions before validating the new field set.
-    rule.template = rule.template.replace("{学生编号}", "{姓名}").replace("{年级}", "")
+    # Normalize templates saved by older versions before validating the field set.
+    rule.template = rule.template.replace("{学生编号}", "{姓名}")
     tokens = set(re.findall(r"\{[^{}]+\}", rule.template))
     if not tokens.issubset(ALLOWED_TOKENS):
         raise ValidationError("命名模板包含不支持的字段")
@@ -1374,6 +1374,7 @@ def render_filename(student, rule, used):
         "{姓名}": student.name,
         "{性别编号}": gender_code,
         "{学部}": _department_code(student.department),
+        "{年级}": student.grade,
         "{班级}": student.class_name,
         "{就读类型}": student.study_type,
     }
@@ -1477,7 +1478,10 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     fd, temp_name = tempfile.mkstemp(prefix="student-export-", suffix=".zip", dir=settings.EXPORT_TEMP_DIR)
     os.close(fd)
     anomalies_total = []
-    split_study_types = not filters.get("study_type")
+    # Keep the archive layout stable even when the admin filters to one type.
+    # This makes every export self-describing and keeps photos under the
+    # corresponding 走读/半走读/住宿 directory.
+    split_study_types = True
     study_type_order = ["走读", "半走读", "住宿"]
     try:
         with zipfile.ZipFile(temp_name, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:

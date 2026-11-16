@@ -321,6 +321,28 @@ def test_same_current_school_year_keeps_all_six_grades_and_export_paths(settings
         temp_path.unlink(missing_ok=True)
 
 
+def test_export_supports_grade_class_naming_and_study_type_folder(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    submission = complete_submission(
+        [["敖恩", "男", "高中部", "2026", "高三", "1", "住宿", ""]],
+        [photo_file("敖恩.jpg")],
+    )
+    admin = User.objects.create_user(username="r2-naming-grade", password="strong-password-123")
+    rule = NamingRule.current()
+    rule.mode = "custom"
+    rule.template = "{姓名}{年级}{班级}"
+    rule.save()
+    review_submission_version(submission_id=submission.id, action="approved", actor=admin)
+
+    temp_path, _, _ = export_students_to_tempfile({"school_year__name": "2026", "study_type": "住宿"}, actor=admin)
+    try:
+        with zipfile.ZipFile(temp_path) as archive:
+            assert "2026/高中部/高三/1/住宿/学生照片/敖恩高三1.jpg" in archive.namelist()
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def test_configured_scope_uses_explicit_grade_for_same_school_year():
     AppSetting.set_value("collection_scope", "configured")
     year = SchoolYear.objects.create(name="2026")
