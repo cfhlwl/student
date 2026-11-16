@@ -172,9 +172,12 @@ def run_preflight(
     result = PreflightResult()
     limits = limits or PreflightLimits.from_settings()
     result.records = _read_roster(roster_upload, result)
+    photo_uploads = list(photo_uploads or [])
+    if not photo_uploads:
+        _add_issue(result, code="photos_required", message="至少上传 1 张学生照片", level="error")
     # The HTTP view supplies the database policy explicitly. Keeping the pure
     # function default off also makes non-HTTP callers safe and predictable.
-    result.photos = _read_photos(photo_uploads or [], result, limits, quality_policy or PhotoQualityPolicy())
+    result.photos = _read_photos(photo_uploads, result, limits, quality_policy or PhotoQualityPolicy())
     _resolve_photo_matches(result)
     return result
 

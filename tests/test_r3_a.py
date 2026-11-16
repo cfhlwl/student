@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -111,7 +112,10 @@ def test_r3_same_idempotency_key_rejects_changed_roster_metadata(settings, tmp_p
 def test_r3_status_endpoint_uses_post_body_and_no_store(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
     client = Client()
-    response = client.post(reverse("upload-start"), data={"roster": roster_upload(), "expected_photo_count": "0"})
+    photo = photo_upload()
+    raw = photo.read()
+    manifest = [{"name": photo.name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}]
+    response = client.post(reverse("upload-start"), data={"roster": roster_upload(), "expected_photo_count": "1", "photo_manifest": json.dumps(manifest)})
     state = response.json()
     status = client.post(reverse("upload-status", args=[state["upload_id"]]), data={"upload_token": state["upload_token"]})
     assert status.status_code == 200

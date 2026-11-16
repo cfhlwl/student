@@ -96,6 +96,18 @@ def test_preflight_blocks_row_errors_mixed_scope_and_duplicate_rows():
     assert not result.can_continue(warnings_acknowledged=True)
 
 
+def test_preflight_requires_at_least_one_photo():
+    roster = roster_file(
+        ["姓名", "性别", "学部", "学年", "班级", "就读类型"],
+        [["张三", "男", "高中部", "2026", "高一", "走读"]],
+    )
+
+    result = run_preflight(roster, [])
+
+    assert "photos_required" in {issue.code for issue in result.blocking_errors}
+    assert not result.can_continue(warnings_acknowledged=True)
+
+
 def test_preflight_blocks_photo_type_size_total_and_duplicate_filename():
     roster = roster_file(
         ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型"],

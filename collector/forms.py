@@ -13,6 +13,8 @@ class MultipleFileField(forms.FileField):
     def clean(self, data, initial=None):
         single_clean = super().clean
         if not data:
+            if self.required:
+                raise forms.ValidationError(self.error_messages["required"])
             return []
         if isinstance(data, (list, tuple)):
             return [single_clean(item, initial) for item in data]
@@ -21,7 +23,7 @@ class MultipleFileField(forms.FileField):
 
 class SubmissionForm(forms.Form):
     roster = forms.FileField(label="Excel 学生名单", help_text="仅支持 .xlsx，建议使用系统模板")
-    photos = MultipleFileField(label="学生照片", required=False, widget=MultipleFileInput(attrs={"accept": ".jpg,.jpeg,.png"}))
+    photos = MultipleFileField(label="学生照片", required=True, widget=MultipleFileInput(attrs={"accept": ".jpg,.jpeg,.png,.mpo"}))
     documents = MultipleFileField(label="相关文档", required=False, widget=MultipleFileInput(attrs={"accept": ".pdf,.doc,.docx,.xls,.xlsx"}))
     note = forms.CharField(label="提交说明", required=False, max_length=500, widget=forms.Textarea(attrs={"rows": 2, "placeholder": "可选，例如：高一新生资料第一批"}))
 

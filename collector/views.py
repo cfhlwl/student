@@ -146,6 +146,8 @@ def submit_preflight(request):
 def upload_start(request):
     try:
         expected_photo_count = int(request.POST.get("expected_photo_count", "0"))
+        if expected_photo_count <= 0:
+            raise ValidationError("至少上传 1 张学生照片")
         session, token, roster_count = start_upload_session(
             roster_upload=request.FILES.get("roster"),
             document_uploads=request.FILES.getlist("documents"),

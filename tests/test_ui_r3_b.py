@@ -41,9 +41,11 @@ def _submission(*, photos=False):
 def test_success_page_exposes_copy_controls_and_save_hint(settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
     client = Client()
+    image = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(image, format="JPEG")
     response = client.post(
         reverse("submit"),
-        data={"roster": roster_upload(), "note": "界面测试"},
+        data={"roster": roster_upload(), "photos": SimpleUploadedFile("界面同学.jpg", image.getvalue(), content_type="image/jpeg"), "note": "界面测试"},
     )
 
     assert response.status_code == 200
