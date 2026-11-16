@@ -282,6 +282,15 @@ def test_blank_gender_does_not_use_female_code():
         temp_path.unlink(missing_ok=True)
 
 
+def test_admin_naming_gender_fields_are_only_visible_in_mode_b():
+    app_source = (Path(__file__).resolve().parents[1] / "static/js/app.js").read_text(encoding="utf-8")
+    template_source = (Path(__file__).resolve().parents[1] / "templates/collector/admin_naming.html").read_text(encoding="utf-8")
+    assert "const genderOnlyFields = [male, female, separator];" in app_source
+    assert "mode.value === 'gender_no'" in app_source
+    assert "label.hidden = !visible" in app_source
+    assert "?v=20261116-5" in template_source
+
+
 def test_current_school_year_semantics_are_explicit_in_template_and_choices():
     assert grade_for("高中部", "2026") == "高一"
     assert grade_for("高中部", "2025") == "高二"
