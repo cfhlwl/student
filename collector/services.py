@@ -27,6 +27,7 @@ from openpyxl.utils import get_column_letter
 from PIL import Image, UnidentifiedImageError
 
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
+from .face_export import DevicePhotoError, prepare_device_photo
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
 from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
 from .study_types import STUDY_TYPE_VALUES, normalize_study_type
@@ -35,6 +36,8 @@ ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "MPO"}
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx"}
 ALLOWED_TOKENS = {"{姓名}", "{性别编号}", "{学部}", "{年级}", "{班级}", "{就读类型}"}
+EXPORT_MODE_ORIGINAL = "original"
+EXPORT_MODE_FACE_DEVICE = "face_device"
 FIELD_MAP = {
     "姓名": "name", "性别": "gender", "学部": "department", "学年": "school_year",
     "班级": "class_name", "就读类型": "study_type",
@@ -1364,7 +1367,7 @@ def send_resubmission_notice(*, submission_id, reason_code, reason, actor, ip_ad
     return _with_db_retry(operation)
 
 
-def render_filename(student, rule, used):
+def render_filename(student, rule, used, extension=None):
     gender_code = ""
     if student.gender == "男":
         gender_code = rule.male_code
@@ -1382,7 +1385,9 @@ def render_filename(student, rule, used):
     for token, value in values.items():
         base = base.replace(token, safe_filename(value, fallback=""))
     base = base or safe_filename(student.name)
-    source_suffix = PurePosixPath(student.photo.original_name).suffix.lower() or ".jpg"
+    source_suffix = extension or PurePosixPath(student.photo.original_name).suffix.lower() or ".jpg"
+    if not source_suffix.startswith("."):
+        source_suffix = "." + source_suffix
     candidate = f"{base}{source_suffix}"
     counter = 2
     while candidate in used:
@@ -1463,6 +1468,10 @@ def _stage_export_file(file_field, *, expected_size=None, expected_sha256=""):
 
 
 def export_students_to_tempfile(filters, actor=None, ip_address=None):
+    export_mode = filters.get("export_mode", EXPORT_MODE_ORIGINAL)
+    if export_mode not in {EXPORT_MODE_ORIGINAL, EXPORT_MODE_FACE_DEVICE}:
+        raise ValidationError("导出模式不正确")
+    device_mode = export_mode == EXPORT_MODE_FACE_DEVICE
     qs = Student.objects.select_related("submission", "school_year").filter(submission__status="approved")
     for key in ["school_year__name", "department", "grade", "class_name", "gender", "study_type"]:
         if filters.get(key): qs = qs.filter(**{key: filters[key]})
@@ -1566,23 +1575,32 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                         student._export_status = student.get_match_status_display()
                         photo = _student_photo(student)
                         if student.match_status == "matched" and photo is not None:
-                            candidate_name = render_filename(student, rule, used)
+                            candidate_name = None if device_mode else render_filename(student, rule, used)
                             staged_photo = None
+                            device_photo = None
                             try:
                                 staged_photo = _stage_export_file(photo.file, expected_size=photo.size, expected_sha256=photo.sha256)
+                                if device_mode:
+                                    device_photo, _ = prepare_device_photo(staged_photo, settings.EXPORT_TEMP_DIR)
+                                    candidate_name = render_filename(student, rule, used, extension=".jpg")
                             except ExportFileError as exc:
                                 student._export_status = "文件缺失"
                                 photo_anomalies.append(("文件缺失", student.name, f"照片无法读取：{photo.file.name}；{exc}"))
+                            except DevicePhotoError as exc:
+                                student._export_status = "设备照片失败"
+                                photo_anomalies.append(("设备照片失败", student.name, f"{photo.original_name}：{exc.message}"))
                             else:
                                 # Only write a ZIP member after the entire source has been read and verified.
                                 # An archive I/O error aborts and removes the whole temporary ZIP; it must not
                                 # be downgraded to a successful-looking truncated member.
-                                archive.write(staged_photo, f"{category_dir}/学生照片/{candidate_name}")
+                                archive.write(device_photo or staged_photo, f"{category_dir}/学生照片/{candidate_name}")
                                 student._export_name = candidate_name
                                 student._export_status = "已导出"
                             finally:
                                 if staged_photo is not None:
                                     staged_photo.unlink(missing_ok=True)
+                                if device_photo is not None:
+                                    device_photo.unlink(missing_ok=True)
                         else:
                             photo_anomalies.append((student.get_match_status_display(), student.name, "没有可导出的已匹配照片"))
                     archive.writestr(f"{category_dir}/学生统计表.xlsx", _write_workbook(category_students, f"{category_dir}", photo_anomalies + class_file_anomalies))
