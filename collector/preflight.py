@@ -18,11 +18,12 @@ from openpyxl import load_workbook
 from PIL import Image, UnidentifiedImageError
 
 from .photo_quality import PhotoQualityPolicy, assess_photo_quality, quality_issue_level
+from .study_types import STUDY_TYPE_VALUES, normalize_study_type
 
 
 DEPARTMENTS = {"初中部", "高中部"}
 GRADES = {"初一", "初二", "初三", "高一", "高二", "高三"}
-STUDY_TYPES = {"走读", "半走读", "住宿"}
+STUDY_TYPES = set(STUDY_TYPE_VALUES)
 YEARS = {"2024", "2025", "2026"}
 GRADE_BY_YEAR = {
     "2024": {"初中部": "初三", "高中部": "高三"},
@@ -267,7 +268,9 @@ def _read_roster(upload: Any, result: PreflightResult) -> list[PreflightStudent]
         if value.get("年级") and grade is None:
             row_errors.append(("invalid_grade", f"第 {row_number} 行年级与学部不匹配或格式不正确"))
         study_type = value.get("就读类型", "")
-        if study_type and study_type not in STUDY_TYPES:
+        try:
+            study_type = normalize_study_type(study_type)
+        except ValueError:
             row_errors.append(("invalid_study_type", f"第 {row_number} 行就读类型只能是走读、半走读或住宿"))
         gender = value.get("性别", "")
         if gender and gender not in {"男", "女"}:

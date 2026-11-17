@@ -1,5 +1,6 @@
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 from django.contrib.auth.models import User
@@ -8,7 +9,8 @@ from django.urls import reverse
 from openpyxl import Workbook, load_workbook
 from PIL import Image
 
-from collector.models import AppSetting, AuditLog, ClassGroup, NamingRule, SchoolYear, Student, StudentPhoto, Submission
+from collector.export_jobs import claim_next_export_job, enqueue_export_job, process_export_job
+from collector.models import AppSetting, AuditLog, ClassGroup, ExportJob, NamingRule, SchoolYear, Student, StudentPhoto, Submission
 from collector.services import ValidationError, clear_all_collection_data, clear_rejected_submissions, create_submission, export_students, parse_roster, template_bytes
 
 
@@ -43,6 +45,30 @@ def test_submission_matches_photo_by_unique_name_and_keeps_token_isolated(settin
     assert submission.students.get().photo_filename_hint == ""
     assert submission.roster_file.name.endswith("名单.xlsx")
     assert Submission.objects.filter(id=submission.id).exists()
+
+
+@pytest.mark.django_db
+def test_submission_normalizes_study_type_suffixes():
+    rows = [
+        ["走读同学", "男", "高中部", "2026", "1", "走读生", ""],
+        ["住宿同学", "女", "高中部", "2026", "1", "住宿生", ""],
+        ["半走读同学", "男", "高中部", "2026", "1", "半走读生", ""],
+    ]
+    submission, _ = create_submission(
+        roster_upload=excel_upload(rows),
+        photo_uploads=[
+            image_upload("走读同学.jpg"),
+            image_upload("住宿同学.jpg"),
+            image_upload("半走读同学.jpg"),
+        ],
+        document_uploads=[],
+    )
+
+    assert dict(submission.students.values_list("name", "study_type")) == {
+        "走读同学": "走读",
+        "住宿同学": "住宿",
+        "半走读同学": "半走读",
+    }
 
 
 @pytest.mark.django_db
@@ -138,14 +164,45 @@ def test_public_home_has_title_and_floating_photo_guide(client):
 
 
 @pytest.mark.django_db
-def test_export_zip_without_filters_returns_zip(client):
+def test_export_zip_queues_job_instead_of_blocking_web_worker(client):
     admin = User.objects.create_user(username="export-admin", password="strong-password-123", is_staff=True)
     client.force_login(admin)
     response = client.get(reverse("export-zip"))
+    assert response.status_code == 302
+    job = ExportJob.objects.get()
+    assert response["Location"] == reverse("admin-export-status", args=[job.pk])
+    assert job.status == "queued"
+
+
+@pytest.mark.django_db
+def test_export_jobs_are_singleflight_and_stream_download_through_nginx(client, settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path
+    admin = User.objects.create_user(username="export-worker-admin", password="strong-password-123", is_staff=True)
+    first = enqueue_export_job({}, actor=admin, ip_address="127.0.0.1")
+    second = enqueue_export_job({}, actor=admin, ip_address="127.0.0.1")
+    assert first.pk == second.pk
+    assert ExportJob.objects.count() == 1
+
+    claimed = claim_next_export_job()
+    assert claimed.pk == first.pk
+    process_export_job(claimed)
+    job = ExportJob.objects.get(pk=first.pk)
+    assert job.status == "completed"
+    assert Path(job.file_path).is_file()
+
+    client.force_login(admin)
+    response = client.get(reverse("admin-export-download", args=[job.pk]))
     assert response.status_code == 200
-    assert response["Content-Type"] == "application/zip"
-    assert b"".join(response.streaming_content)[:2] == b"PK"
-    response.close()
+    assert response["X-Accel-Redirect"].startswith("/_protected-exports/export-job-")
+    assert response["Content-Length"] == str(Path(job.file_path).stat().st_size)
+
+
+@pytest.mark.django_db
+def test_export_status_and_download_require_staff(client):
+    job = ExportJob.objects.create(fingerprint="f" * 64, filters={})
+    assert client.get(reverse("admin-export-status", args=[job.pk])).status_code == 302
+    assert client.get(reverse("admin-export-job-status", args=[job.pk])).status_code == 302
+    assert client.get(reverse("admin-export-download", args=[job.pk])).status_code == 302
 
 
 @pytest.mark.django_db

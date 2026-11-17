@@ -29,6 +29,7 @@ from PIL import Image, UnidentifiedImageError
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
 from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
+from .study_types import STUDY_TYPE_VALUES, normalize_study_type
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "MPO"}
@@ -44,9 +45,6 @@ LEGACY_GRADE_BY_YEAR = {
     "2025": {"middle": "初二", "high": "高二"},
     "2024": {"middle": "初三", "high": "高三"},
 }
-STUDY_TYPE_VALUES = ("走读", "半走读", "住宿")
-
-
 @dataclass
 class PreparedUpload:
     name: str
@@ -291,7 +289,9 @@ def parse_roster(upload):
             record["年级"] = normalize_grade(record["年级"], record["学部"]) if record.get("年级") else legacy_grade_for(record["学部"], record["学年"])
         except ValidationError as exc:
             row_errors.append(str(exc))
-        if record.get("就读类型") not in set(STUDY_TYPE_VALUES):
+        try:
+            record["就读类型"] = normalize_study_type(record.get("就读类型"))
+        except ValueError:
             row_errors.append("就读类型不正确")
         identity = (record.get("学年"), record.get("学部"), record.get("班级"), record.get("姓名"), record.get("性别"), record.get("就读类型"))
         if identity in seen:
@@ -1470,6 +1470,9 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     if filters.get("has_photo") == "yes": students = [s for s in students if s.match_status == "matched" and hasattr(s, "photo")]
     if filters.get("has_photo") == "no": students = [s for s in students if not (s.match_status == "matched" and hasattr(s, "photo"))]
     rule = validate_naming_rule(NamingRule.current())
+    export_layout = AppSetting.get_value("export_layout", "by_class")
+    if export_layout not in {"by_class", "by_study_type"}:
+        export_layout = "by_class"
     groups = defaultdict(list)
     # 学年是导出范围的一部分；同名班级在不同学年必须落入不同目录。
     for student in students:
@@ -1483,11 +1486,22 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     # corresponding 走读/半走读/住宿 directory.
     split_study_types = True
     study_type_order = ["走读", "半走读", "住宿"]
+    if export_layout == "by_study_type":
+        export_groups = [
+            ((study_type,), [student for student in students if student.study_type == study_type])
+            for study_type in study_type_order
+        ]
+        export_groups = [(key, group_students) for key, group_students in export_groups if group_students]
+    else:
+        export_groups = list(groups.items())
     try:
         with zipfile.ZipFile(temp_name, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            for group_key, group_students in groups.items():
-                school_year, dept, grade, class_name = group_key
-                class_dir = "/".join(safe_filename(v) for v in [school_year, _department_code(dept), grade, class_name])
+            for group_key, group_students in export_groups:
+                if export_layout == "by_study_type":
+                    class_dir = safe_filename(group_key[0])
+                else:
+                    school_year, dept, grade, class_name = group_key
+                    class_dir = "/".join(safe_filename(v) for v in [school_year, _department_code(dept), grade, class_name])
                 class_submissions = list(Submission.objects.filter(students__in=group_students).distinct())
                 class_file_anomalies = []
                 roster_names = set()
@@ -1532,16 +1546,21 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                             staged_document.unlink(missing_ok=True)
 
                 category_groups = defaultdict(list)
-                if split_study_types:
+                if export_layout == "by_study_type":
+                    category_groups[""] = group_students
+                    category_order = [""]
+                elif split_study_types:
                     for student in group_students: category_groups[student.study_type].append(student)
+                    category_order = study_type_order
                 else:
                     category_groups[""] = group_students
-                for study_type in study_type_order if split_study_types else [""]:
+                    category_order = [""]
+                for study_type in category_order:
                     category_students = category_groups.get(study_type, [])
                     if not category_students:
                         continue
                     used, photo_anomalies = set(), []
-                    category_dir = f"{class_dir}/{safe_filename(study_type)}" if split_study_types else class_dir
+                    category_dir = class_dir if export_layout == "by_study_type" else f"{class_dir}/{safe_filename(study_type)}" if split_study_types else class_dir
                     for student in category_students:
                         student._export_name = ""
                         student._export_status = student.get_match_status_display()
@@ -1569,7 +1588,7 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                     archive.writestr(f"{category_dir}/学生统计表.xlsx", _write_workbook(category_students, f"{category_dir}", photo_anomalies + class_file_anomalies))
                     anomalies_total.extend(photo_anomalies)
                 anomalies_total.extend(class_file_anomalies)
-            if len(groups) > 1:
+            if len(export_groups) > 1:
                 archive.writestr("总统计表.xlsx", _write_workbook(students, "跨班级导出", anomalies_total))
         _with_db_retry(lambda: AuditLog.objects.create(actor=actor, action="export_students", target_type="Student", detail={"filters": filters, "count": len(students)}, ip_address=ip_address))
         return Path(temp_name), len(students), [getattr(s, "_export_name", "") for s in students[:10]]

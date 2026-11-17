@@ -282,17 +282,29 @@ document.addEventListener('DOMContentLoaded', function () {
   const female = document.querySelector('[name=female_code]');
   const separator = document.querySelector('[name=separator]');
   const preview = document.getElementById('filename-preview');
+  const genderOnlyFields = [male, female, separator];
   function renderPreview() {
     if (!preview || !mode) return;
-    let text = template.value || '{姓名}';
+    let text = (template && template.value) || '{姓名}';
     if (mode.value === 'name') text = '{姓名}';
-    if (mode.value === 'gender_no') text = '{姓名}' + (separator.value || '') + '{性别编号}';
-    const values = {'{姓名}':'张三','{性别编号}':male.value || '01','{学部}':'高中部','{年级}':'高一','{班级}':'1','{就读类型}':'走读'};
+    if (mode.value === 'gender_no') text = '{姓名}' + ((separator && separator.value) || '') + '{性别编号}';
+    const values = {'{姓名}':'张三','{性别编号}':(male && male.value) || '01','{学部}':'高中部','{年级}':'高一','{班级}':'1','{就读类型}':'走读'};
     Object.keys(values).forEach(function (key) { text = text.replaceAll(key, values[key]); });
     preview.textContent = text + '.jpg';
   }
-  [mode, template, male, female, separator].filter(Boolean).forEach(function (el) { el.addEventListener('input', renderPreview); el.addEventListener('change', renderPreview); });
-  renderPreview();
+  function updateNamingFieldVisibility() {
+    const visible = mode && mode.value === 'gender_no';
+    genderOnlyFields.forEach(function (field) {
+      const label = field && field.closest('label');
+      if (label) label.hidden = !visible;
+    });
+  }
+  function refreshNamingSettings() {
+    renderPreview();
+    updateNamingFieldVisibility();
+  }
+  [mode, template, male, female, separator].filter(Boolean).forEach(function (el) { el.addEventListener('input', refreshNamingSettings); el.addEventListener('change', refreshNamingSettings); });
+  refreshNamingSettings();
   const photoModal = document.getElementById('photo-modal');
   const photoModalImage = document.getElementById('photo-modal-image');
   const photoModalCaption = document.getElementById('photo-modal-caption');

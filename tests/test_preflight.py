@@ -77,6 +77,36 @@ def test_preflight_reports_match_missing_and_same_name_manual_warning(monkeypatc
     assert result.can_continue(warnings_acknowledged=True)
 
 
+def test_preflight_normalizes_study_type_suffixes():
+    roster = roster_file(
+        ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型"],
+        [
+            ["走读同学", "男", "高中部", "2026", "高一", "1", "走读生"],
+            ["住宿同学", "女", "高中部", "2026", "高一", "1", "住宿生"],
+            ["半走读同学", "男", "高中部", "2026", "高一", "1", "半走读生"],
+        ],
+    )
+    result = run_preflight(
+        roster,
+        [photo_file("走读同学.jpg"), photo_file("住宿同学.jpg"), photo_file("半走读同学.jpg")],
+    )
+
+    assert not result.blocking_errors
+    assert [record.study_type for record in result.records] == ["走读", "住宿", "半走读"]
+
+
+def test_preflight_rejects_negative_or_ambiguous_study_type_values():
+    for value in ["不住宿", "非住宿", "不半走读", "住宿或走读", "住宿同学"]:
+        result = run_preflight(
+            roster_file(
+                ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型"],
+                [["张三", "男", "高中部", "2026", "高一", "1", value]],
+            ),
+            [photo_file("张三.jpg")],
+        )
+        assert any(issue.code == "invalid_study_type" for issue in result.blocking_errors), value
+
+
 def test_preflight_blocks_row_errors_mixed_scope_and_duplicate_rows():
     roster = roster_file(
         ["姓名", "性别", "学部", "学年", "年级", "班级", "就读类型"],

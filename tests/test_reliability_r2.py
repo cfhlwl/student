@@ -282,6 +282,15 @@ def test_blank_gender_does_not_use_female_code():
         temp_path.unlink(missing_ok=True)
 
 
+def test_admin_naming_gender_fields_are_only_visible_in_mode_b():
+    app_source = (Path(__file__).resolve().parents[1] / "static/js/app.js").read_text(encoding="utf-8")
+    template_source = (Path(__file__).resolve().parents[1] / "templates/collector/admin_naming.html").read_text(encoding="utf-8")
+    assert "const genderOnlyFields = [male, female, separator];" in app_source
+    assert "mode.value === 'gender_no'" in app_source
+    assert "label.hidden = !visible" in app_source
+    assert "?v=20261116-5" in template_source
+
+
 def test_current_school_year_semantics_are_explicit_in_template_and_choices():
     assert grade_for("高中部", "2026") == "高一"
     assert grade_for("高中部", "2025") == "高二"
@@ -339,6 +348,33 @@ def test_export_supports_grade_class_naming_and_study_type_folder(settings, tmp_
     try:
         with zipfile.ZipFile(temp_path) as archive:
             assert "2026/高中部/高三/1/住宿/学生照片/敖恩高三1.jpg" in archive.namelist()
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def test_export_can_merge_all_classes_by_study_type(settings, tmp_path):
+    settings.MEDIA_ROOT = tmp_path
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    first = complete_submission(
+        [["住宿甲", "男", "高中部", "2026", "高三", "1", "住宿", ""]],
+        [photo_file("住宿甲.jpg")],
+    )
+    second = complete_submission(
+        [["走读乙", "女", "高中部", "2026", "高三", "2", "走读", ""]],
+        [photo_file("走读乙.jpg")],
+    )
+    admin = User.objects.create_user(username="r2-naming-layout", password="strong-password-123")
+    review_submission_version(submission_id=first.id, action="approved", actor=admin)
+    review_submission_version(submission_id=second.id, action="approved", actor=admin)
+    AppSetting.set_value("export_layout", "by_study_type")
+
+    temp_path, _, _ = export_students_to_tempfile({"school_year__name": "2026"}, actor=admin)
+    try:
+        with zipfile.ZipFile(temp_path) as archive:
+            names = set(archive.namelist())
+            assert "住宿/学生照片/住宿甲.jpg" in names
+            assert "走读/学生照片/走读乙.jpg" in names
+            assert not any(name.startswith("2026/") for name in names)
     finally:
         temp_path.unlink(missing_ok=True)
 
