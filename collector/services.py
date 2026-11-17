@@ -29,6 +29,7 @@ from PIL import Image, UnidentifiedImageError
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
 from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
+from .study_types import STUDY_TYPE_VALUES, normalize_study_type
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "MPO"}
@@ -44,9 +45,6 @@ LEGACY_GRADE_BY_YEAR = {
     "2025": {"middle": "初二", "high": "高二"},
     "2024": {"middle": "初三", "high": "高三"},
 }
-STUDY_TYPE_VALUES = ("走读", "半走读", "住宿")
-
-
 @dataclass
 class PreparedUpload:
     name: str
@@ -291,7 +289,9 @@ def parse_roster(upload):
             record["年级"] = normalize_grade(record["年级"], record["学部"]) if record.get("年级") else legacy_grade_for(record["学部"], record["学年"])
         except ValidationError as exc:
             row_errors.append(str(exc))
-        if record.get("就读类型") not in set(STUDY_TYPE_VALUES):
+        try:
+            record["就读类型"] = normalize_study_type(record.get("就读类型"))
+        except ValueError:
             row_errors.append("就读类型不正确")
         identity = (record.get("学年"), record.get("学部"), record.get("班级"), record.get("姓名"), record.get("性别"), record.get("就读类型"))
         if identity in seen:

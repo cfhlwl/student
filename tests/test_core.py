@@ -46,6 +46,30 @@ def test_submission_matches_photo_by_unique_name_and_keeps_token_isolated(settin
 
 
 @pytest.mark.django_db
+def test_submission_normalizes_study_type_suffixes():
+    rows = [
+        ["走读同学", "男", "高中部", "2026", "1", "走读生", ""],
+        ["住宿同学", "女", "高中部", "2026", "1", "住宿生", ""],
+        ["半走读同学", "男", "高中部", "2026", "1", "半走读生", ""],
+    ]
+    submission, _ = create_submission(
+        roster_upload=excel_upload(rows),
+        photo_uploads=[
+            image_upload("走读同学.jpg"),
+            image_upload("住宿同学.jpg"),
+            image_upload("半走读同学.jpg"),
+        ],
+        document_uploads=[],
+    )
+
+    assert dict(submission.students.values_list("name", "study_type")) == {
+        "走读同学": "走读",
+        "住宿同学": "住宿",
+        "半走读同学": "半走读",
+    }
+
+
+@pytest.mark.django_db
 def test_duplicate_excel_row_and_cross_class_are_rejected():
     duplicate = [["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""], ["A-001", "张三", "男", "高中部", "2026-2027", "高一", "1", "走读", "", ""]]
     with pytest.raises(ValidationError, match="Excel 存在逐行错误"):
