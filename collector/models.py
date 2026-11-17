@@ -315,3 +315,35 @@ class AuditLog(models.Model):
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+
+class ExportJob(models.Model):
+    STATUS_CHOICES = [
+        ("queued", "排队中"),
+        ("running", "生成中"),
+        ("completed", "已完成"),
+        ("failed", "失败"),
+        ("expired", "已过期"),
+    ]
+
+    fingerprint = models.CharField(max_length=64, unique=True)
+    filters = models.JSONField(default=dict)
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="queued")
+    requested_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="export_jobs")
+    requested_ip = models.GenericIPAddressField(null=True, blank=True)
+    file_path = models.CharField(max_length=500, blank=True)
+    file_name = models.CharField(max_length=255, default="学生资料导出.zip")
+    student_count = models.PositiveIntegerField(default=0)
+    preview = models.JSONField(default=list, blank=True)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "created_at"], name="export_job_status_created_idx"),
+        ]
+

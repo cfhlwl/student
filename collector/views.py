@@ -3,6 +3,7 @@ import json
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib import messages
@@ -20,10 +21,11 @@ from django.views.decorators.http import require_GET, require_POST
 from .backup import BackupError, clear_collection_safely
 from .maintenance import MaintenanceError, collection_maintenance_gate, collection_write_gate, public_upload_is_open, read_state, write_state
 from .forms import ExportFilterForm, NamingRuleForm, ResubmissionNoticeForm, SubmissionForm
-from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
+from .models import AppSetting, AuditLog, ClassGroup, ExportJob, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
 from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, face_quality_detection_enabled, read_face_quality_policy
 from .preflight import run_preflight
-from .services import ValidationError, create_photo_supplement, create_submission, export_students_to_tempfile, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, send_resubmission_notice, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
+from .export_jobs import enqueue_export_job
+from .services import ValidationError, create_photo_supplement, create_submission, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, send_resubmission_notice, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 from .statistics import build_admin_statistics_context, build_exception_workbook
 
 
@@ -76,18 +78,6 @@ def _public_resubmission_notices():
         seen_labels.add(class_label)
         notices.append(f"{class_label} {notice.reason}，请重新上传照片！")
     return notices[:10]
-
-
-class TemporaryZipResponse(FileResponse):
-    def __init__(self, path, *args, **kwargs):
-        self._temporary_path = Path(path)
-        super().__init__(open(self._temporary_path, "rb"), *args, **kwargs)
-
-    def close(self):
-        try:
-            super().close()
-        finally:
-            self._temporary_path.unlink(missing_ok=True)
 
 
 def public_submit(request):
@@ -593,11 +583,52 @@ def export_zip(request):
         return JsonResponse({"errors": form.errors}, status=400)
     filters = filter_values(form)
     if form.cleaned_data.get("has_photo"): filters["has_photo"] = form.cleaned_data["has_photo"]
-    temp_path, count, preview = export_students_to_tempfile(filters, actor=request.user, ip_address=client_ip(request))
-    response = TemporaryZipResponse(temp_path, content_type="application/zip")
-    response["Content-Disposition"] = 'attachment; filename="学生资料导出.zip"'
-    response["X-Export-Student-Count"] = str(count)
-    response["X-Export-Preview"] = json.dumps(preview, ensure_ascii=False)
+    job = enqueue_export_job(filters, actor=request.user, ip_address=client_ip(request))
+    if request.headers.get("Accept") == "application/json":
+        return JsonResponse({"job_id": job.pk, "status": job.status, "status_url": reverse("admin-export-status", args=[job.pk])}, status=202)
+    return redirect("admin-export-status", job_id=job.pk)
+
+
+@require_GET
+@staff_required
+def admin_export_status(request, job_id):
+    job = get_object_or_404(ExportJob, pk=job_id)
+    return render(request, "collector/admin_export_status.html", {"job": job})
+
+
+@require_GET
+@staff_required
+def admin_export_job_status(request, job_id):
+    job = get_object_or_404(ExportJob, pk=job_id)
+    payload = {
+        "id": job.pk,
+        "status": job.status,
+        "status_label": job.get_status_display(),
+        "student_count": job.student_count,
+        "preview": job.preview,
+        "error": job.error,
+        "download_url": reverse("admin-export-download", args=[job.pk]) if job.status == "completed" else "",
+    }
+    return JsonResponse(payload)
+
+
+@require_GET
+@staff_required
+def admin_export_download(request, job_id):
+    job = get_object_or_404(ExportJob, pk=job_id, status="completed")
+    path = Path(job.file_path)
+    export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
+    try:
+        path.resolve().relative_to(export_root)
+    except ValueError:
+        raise Http404
+    if not path.is_file():
+        raise Http404
+    response = HttpResponse(content_type="application/zip")
+    response["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(job.file_name)
+    response["Content-Length"] = str(path.stat().st_size)
+    response["X-Accel-Redirect"] = "/_protected-exports/" + quote(path.name)
+    response["Cache-Control"] = "private, no-store"
     return response
 
 
