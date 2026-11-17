@@ -1,0 +1,24 @@
+{% extends 'collector/admin_base.html' %}
+{% load static %}
+{% block title %}导出下载 · {{ site_name }}{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="{% static 'css/admin_exports.css' %}?v=20261117-1">{% endblock %}
+{% block admin_content %}
+<div class="page-heading"><div><div class="eyebrow">后台导出 / 长期保留</div><h1>导出下载</h1></div><a class="button dark" href="{% url 'admin-students' %}">返回学生资料与导出</a></div>
+<section class="panel export-list-panel">
+  <p class="preview-note">导出完成后会一直保留在这里，只有点击“删除”才会删除对应 ZIP。相同筛选条件可以重复生成；正在生成的相同任务不会重复入队。</p>
+  <div class="table-wrap"><table><thead><tr><th>任务</th><th>类型</th><th>状态</th><th>进度 / 人数</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
+  {% for job in job_page %}
+  <tr>
+    <td><a class="text-link" href="{% url 'admin-export-status' job.pk %}">#{{ job.pk }}</a><br><small>{{ job.file_name }}</small></td>
+    <td>{% if job.filters.export_mode == 'face_device' %}人脸设备 ZIP{% else %}原始资料 ZIP{% endif %}</td>
+    <td><span class="status status-{{ job.status }}">{{ job.get_status_display }}</span>{% if job.error %}<br><small class="export-error-text">{{ job.error|truncatechars:80 }}</small>{% endif %}</td>
+    <td>{% if job.status == 'queued' or job.status == 'running' %}<div class="export-progress"><progress max="{{ job.total_count|default:1 }}" value="{{ job.processed_count }}"></progress><span>{% if job.total_count %}{{ job.processed_count }} / {{ job.total_count }}{% else %}正在准备…{% endif %}</span></div>{% elif job.status == 'completed' %}{{ job.student_count }} 人{% else %}—{% endif %}</td>
+    <td>{{ job.created_at|date:'Y-m-d H:i' }}</td>
+    <td><div class="inline-form export-row-actions">{% if job.status == 'completed' %}<a class="button tiny primary" href="{% url 'admin-export-download' job.pk %}">下载</a>{% elif job.status == 'queued' or job.status == 'running' %}<a class="button tiny ghost" href="{% url 'admin-export-status' job.pk %}">查看进度</a>{% endif %}{% if job.status != 'queued' and job.status != 'running' %}<form method="post" action="{% url 'admin-export-delete' job.pk %}" onsubmit="return confirm('确定删除这个导出任务和对应 ZIP 吗？学生资料不会被删除。');">{% csrf_token %}<button class="button tiny ghost" type="submit">删除</button></form>{% endif %}</div></td>
+  </tr>
+  {% empty %}<tr><td colspan="6" class="empty">还没有导出任务。</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% if job_page.paginator.num_pages > 1 %}<nav class="pagination" aria-label="导出任务分页">{% if job_page.has_previous %}<a href="?page={{ job_page.previous_page_number }}">上一页</a>{% endif %}<span>第 {{ job_page.number }} / {{ job_page.paginator.num_pages }} 页</span>{% if job_page.has_next %}<a href="?page={{ job_page.next_page_number }}">下一页</a>{% endif %}</nav>{% endif %}
+</section>
+{% if job_page.object_list|length %}<script>window.setTimeout(() => { if (document.querySelector('.status-queued,.status-running')) window.location.reload(); }, 5000);</script>{% endif %}
+{% endblock %}

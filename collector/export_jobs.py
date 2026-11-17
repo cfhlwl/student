@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
@@ -52,13 +52,26 @@ def export_file_name(filters):
     return "人脸识别设备资料.zip" if filters.get("export_mode") == EXPORT_MODE_FACE_DEVICE else EXPORT_FILE_NAME
 
 
-def build_export_snapshot(filters):
-    """Digest every database row that can affect the resulting archive."""
+def _selected_students(filters):
     qs = Student.objects.select_related("submission", "school_year").filter(submission__status="approved")
     for key in ["school_year__name", "department", "grade", "class_name", "gender", "study_type"]:
         if filters.get(key):
             qs = qs.filter(**{key: filters[key]})
     students = list(qs.order_by("department", "grade", "class_name", "name", "id"))
+    photos = {
+        row.student_id: row
+        for row in StudentPhoto.objects.filter(student_id__in=[student.id for student in students])
+    }
+    if filters.get("has_photo") == "yes":
+        students = [student for student in students if student.match_status == "matched" and student.id in photos]
+    elif filters.get("has_photo") == "no":
+        students = [student for student in students if not (student.match_status == "matched" and student.id in photos)]
+    return students
+
+
+def build_export_snapshot(filters):
+    """Digest every database row that can affect the resulting archive."""
+    students = _selected_students(filters)
     photos = {
         row.student_id: row
         for row in StudentPhoto.objects.filter(student_id__in=[student.id for student in students])
@@ -131,6 +144,10 @@ def build_export_snapshot(filters):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def count_export_students(filters):
+    return len(_selected_students(filters))
+
+
 def build_export_fingerprint(filters, snapshot=None):
     snapshot = snapshot or build_export_snapshot(filters)
     options = _export_options()
@@ -157,49 +174,28 @@ def enqueue_export_job(filters, actor=None, ip_address=None):
         filters["export_mode"] = export_mode
     with collection_write_gate():
         fingerprint, snapshot = build_export_fingerprint(filters)
-        now = timezone.now()
-        retention = timedelta(hours=max(1, settings.EXPORT_RETENTION_HOURS))
+        total_count = count_export_students(filters)
         with transaction.atomic():
-            job = ExportJob.objects.filter(fingerprint=fingerprint).first()
-            if job and job.status in {"queued", "running"}:
-                return job
-            if job and job.status == "completed" and job.expires_at and job.expires_at > now and job.file_path and Path(job.file_path).is_file():
-                return job
-            if job:
-                previous_file = Path(job.file_path) if job.file_path else None
-                job.status = "queued"
-                job.data_snapshot = snapshot
-                job.error = ""
-                job.file_path = ""
-                job.student_count = 0
-                job.preview = []
-                job.file_name = export_file_name(filters)
-                job.started_at = None
-                job.completed_at = None
-                job.expires_at = None
-                job.lease_token = ""
-                job.requested_by = actor
-                job.requested_ip = ip_address
-                job.created_at = now
-                job.save()
-                if previous_file:
-                    previous_file.unlink(missing_ok=True)
-                return job
+            active_job = ExportJob.objects.filter(
+                fingerprint=fingerprint,
+                status__in=["queued", "running"],
+            ).order_by("created_at", "id").first()
+            if active_job:
+                return active_job
             active_count = ExportJob.objects.filter(status__in=["queued", "running"]).count()
             if active_count >= settings.EXPORT_MAX_ACTIVE_JOBS:
                 raise ExportQueueFull("导出任务较多，请等待当前任务完成后再试。")
-            try:
-                return ExportJob.objects.create(
-                    fingerprint=fingerprint,
-                    filters=filters,
-                    data_snapshot=snapshot,
-                    requested_by=actor,
-                    requested_ip=ip_address,
-                    file_name=export_file_name(filters),
-                    expires_at=now + retention,
-                )
-            except IntegrityError:
-                return ExportJob.objects.get(fingerprint=fingerprint)
+            return ExportJob.objects.create(
+                fingerprint=fingerprint,
+                filters=filters,
+                data_snapshot=snapshot,
+                requested_by=actor,
+                requested_ip=ip_address,
+                file_name=export_file_name(filters),
+                total_count=total_count,
+                processed_count=0,
+                expires_at=None,
+            )
 
 
 def claim_next_export_job():
@@ -237,6 +233,18 @@ def _make_export_file_readable(path):
     os.chmod(path, EXPORT_FILE_MODE)
 
 
+def _update_export_progress(job, token, processed_count, total_count):
+    with collection_write_gate():
+        updated = ExportJob.objects.filter(
+            pk=job.pk,
+            status="running",
+            lease_token=token,
+            attempt=job.attempt,
+        ).update(total_count=total_count, processed_count=processed_count)
+    if updated != 1:
+        raise ExportLeaseLost("导出任务租约已失效")
+
+
 def process_export_job(job):
     token = job.lease_token
     final_path = Path(settings.EXPORT_TEMP_DIR) / f"export-job-{job.pk}-{token}.zip"
@@ -246,6 +254,7 @@ def process_export_job(job):
             job.filters,
             actor=job.requested_by,
             ip_address=job.requested_ip,
+            progress_callback=lambda processed, total: _update_export_progress(job, token, processed, total),
         )
         with collection_write_gate():
             current = ExportJob.objects.filter(
@@ -264,7 +273,6 @@ def process_export_job(job):
             # Publish permissions before recording the completed path. If this
             # fails, the job is failed and no unreadable download link is saved.
             _make_export_file_readable(final_path)
-            expires_at = timezone.now() + timedelta(hours=max(1, settings.EXPORT_RETENTION_HOURS))
             updated = ExportJob.objects.filter(
                 pk=job.pk, status="running", lease_token=token, attempt=job.attempt,
             ).update(
@@ -273,7 +281,7 @@ def process_export_job(job):
                 student_count=count,
                 preview=preview,
                 completed_at=timezone.now(),
-                expires_at=expires_at,
+                expires_at=None,
                 error="",
             )
             if updated != 1:
@@ -298,14 +306,9 @@ def cleanup_export_jobs():
             ExportJob.objects.filter(status="running", started_at__lt=stale_before).update(
                 status="queued", started_at=None, error="导出 worker 中断，已重新排队。", lease_token=""
             )
-            expired = ExportJob.objects.filter(status="completed", expires_at__lt=now)
-            for job in expired.iterator():
-                path = Path(job.file_path) if job.file_path else None
-                if path:
-                    path.unlink(missing_ok=True)
-                ExportJob.objects.filter(pk=job.pk, status="completed", file_path=job.file_path).update(
-                    status="expired", file_path=""
-                )
+            # Completed archives are retained until an administrator explicitly
+            # deletes the task from the export download center.  The cleanup
+            # loop only handles abandoned workers and unreferenced temp files.
             export_dir = Path(settings.EXPORT_TEMP_DIR)
             if not export_dir.is_dir():
                 return

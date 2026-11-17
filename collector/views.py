@@ -613,6 +613,14 @@ def admin_export_status(request, job_id):
 
 @require_GET
 @staff_required
+def admin_exports(request):
+    jobs = ExportJob.objects.select_related("requested_by").all()
+    page = Paginator(jobs, 50).get_page(request.GET.get("page", 1))
+    return render(request, "collector/admin_exports.html", {"job_page": page})
+
+
+@require_GET
+@staff_required
 def admin_export_job_status(request, job_id):
     job = get_object_or_404(ExportJob, pk=job_id)
     payload = {
@@ -620,11 +628,53 @@ def admin_export_job_status(request, job_id):
         "status": job.status,
         "status_label": job.get_status_display(),
         "student_count": job.student_count,
+        "total_count": job.total_count,
+        "processed_count": job.processed_count,
+        "progress_percent": round(job.processed_count * 100 / job.total_count) if job.total_count else 0,
         "preview": job.preview,
         "error": job.error,
         "download_url": reverse("admin-export-download", args=[job.pk]) if job.status == "completed" else "",
     }
     return JsonResponse(payload)
+
+
+@require_POST
+@staff_required
+def admin_export_delete(request, job_id):
+    try:
+        with collection_write_gate():
+            with transaction.atomic():
+                job = get_object_or_404(ExportJob.objects.select_for_update(), pk=job_id)
+                if job.status in {"queued", "running"}:
+                    messages.error(request, "生成中的导出任务不能删除，请等待任务结束。")
+                    return redirect("admin-exports")
+                path = Path(job.file_path) if job.file_path else None
+                if path:
+                    export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
+                    try:
+                        path.resolve().relative_to(export_root)
+                    except ValueError:
+                        messages.error(request, "导出文件路径无效，未删除任务。")
+                        return redirect("admin-exports")
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        messages.error(request, f"导出文件删除失败：{exc}")
+                        return redirect("admin-exports")
+                AuditLog.objects.create(
+                    actor=request.user,
+                    action="delete_export",
+                    target_type="ExportJob",
+                    target_id=str(job.pk),
+                    detail={"status": job.status, "student_count": job.student_count},
+                    ip_address=client_ip(request),
+                )
+                job.delete()
+    except MaintenanceError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "导出任务及其 ZIP 已删除。")
+    return redirect("admin-exports")
 
 
 @require_GET
