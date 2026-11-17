@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from math import hypot
 from pathlib import Path
 
 import numpy as np
@@ -70,7 +71,7 @@ def _box_area(box: tuple[int, int, int, int]) -> int:
     return max(0, box[2]) * max(0, box[3])
 
 
-def _boxes_overlap(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
+def _same_face_detection(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
     left = max(first[0], second[0])
     top = max(first[1], second[1])
     right = min(first[0] + first[2], second[0] + second[2])
@@ -78,18 +79,29 @@ def _boxes_overlap(first: tuple[int, int, int, int], second: tuple[int, int, int
     intersection = max(0, right - left) * max(0, bottom - top)
     if not intersection:
         return False
-    smaller_area = min(_box_area(first), _box_area(second))
     union = _box_area(first) + _box_area(second) - intersection
-    return smaller_area > 0 and (intersection / smaller_area >= 0.5 or intersection / union >= 0.25)
+    if union <= 0:
+        return False
+    iou = intersection / union
+    first_center = (first[0] + first[2] / 2, first[1] + first[3] / 2)
+    second_center = (second[0] + second[2] / 2, second[1] + second[3] / 2)
+    center_distance = hypot(first_center[0] - second_center[0], first_center[1] - second_center[1])
+    center_limit = 0.35 * min(first[2], first[3], second[2], second[3])
+    width_ratio = max(first[2], second[2]) / min(first[2], second[2])
+    height_ratio = max(first[3], second[3]) / min(first[3], second[3])
+    return iou >= 0.65 and center_distance <= center_limit and width_ratio <= 1.35 and height_ratio <= 1.35
 
 
 def _dedupe_boxes(raw_boxes) -> list[tuple[int, int, int, int]]:
     boxes: list[tuple[int, int, int, int]] = []
+    normalized = []
     for raw_box in raw_boxes:
         box = tuple(int(value) for value in raw_box[:4])
         if box[2] <= 0 or box[3] <= 0:
             continue
-        if any(_boxes_overlap(box, existing) for existing in boxes):
+        normalized.append(box)
+    for box in sorted(normalized, key=lambda item: (-_box_area(item), item)):
+        if any(_same_face_detection(box, existing) for existing in boxes):
             continue
         boxes.append(box)
     return boxes
@@ -143,7 +155,7 @@ def _detect_face(image: Image.Image) -> tuple[int, int, int, int, float, float, 
     if not frontal_boxes:
         raise _error("no_face", "未检测到清晰正脸，不能生成设备专用照片。")
     if len(frontal_boxes) > 1 or any(
-        not any(_boxes_overlap(profile_box, frontal_box) for frontal_box in frontal_boxes)
+        not any(_same_face_detection(profile_box, frontal_box) for frontal_box in frontal_boxes)
         for profile_box in profile_boxes
     ):
         raise _error("multiple_faces", "检测到多张人脸，不能自动选择其中一张。")

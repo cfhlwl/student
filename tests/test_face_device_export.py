@@ -179,6 +179,39 @@ def test_mixed_frontal_and_distinct_profile_faces_are_rejected(monkeypatch, tmp_
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "faces",
+    [
+        [(100, 100, 200, 200), (200, 100, 200, 200)],
+        [(200, 100, 200, 200), (100, 100, 200, 200)],
+    ],
+)
+def test_partially_overlapping_frontal_faces_are_rejected_in_any_order(monkeypatch, tmp_path, faces):
+    fake_models(monkeypatch, faces=faces)
+    source = tmp_path / "partial-overlap.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    with pytest.raises(DevicePhotoError) as exc_info:
+        prepare_device_photo(source, tmp_path / "out")
+    assert exc_info.value.code == "multiple_faces"
+
+
+@pytest.mark.django_db
+def test_adjacent_partially_overlapping_profile_face_is_rejected(monkeypatch, tmp_path):
+    fake_models(
+        monkeypatch,
+        faces=[(200, 200, 400, 500)],
+        profiles=[(500, 250, 300, 420)],
+    )
+    source = tmp_path / "adjacent-profile.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    with pytest.raises(DevicePhotoError) as exc_info:
+        prepare_device_photo(source, tmp_path / "out")
+    assert exc_info.value.code == "multiple_faces"
+
+
+@pytest.mark.django_db
 def test_overlapping_profile_box_is_deduplicated(monkeypatch, tmp_path):
     fake_models(
         monkeypatch,
@@ -186,6 +219,23 @@ def test_overlapping_profile_box_is_deduplicated(monkeypatch, tmp_path):
         profiles=[(220, 210, 380, 480)],
     )
     source = tmp_path / "same-face-detectors.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    output, _ = prepare_device_photo(source, tmp_path / "out")
+    assert output.is_file()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "faces",
+    [
+        [(200, 200, 400, 500), (220, 210, 380, 480)],
+        [(220, 210, 380, 480), (200, 200, 400, 500)],
+    ],
+)
+def test_same_face_high_overlap_deduplication_is_order_independent(monkeypatch, tmp_path, faces):
+    fake_models(monkeypatch, faces=faces)
+    source = tmp_path / "same-face-order.jpg"
     source.write_bytes(noisy_jpeg())
 
     output, _ = prepare_device_photo(source, tmp_path / "out")
