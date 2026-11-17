@@ -313,6 +313,13 @@ def cleanup_export_jobs():
             if not export_dir.is_dir():
                 return
             orphan_before = now.timestamp() - max(3600, settings.EXPORT_JOB_TIMEOUT_SECONDS)
+            handoff_before = now.timestamp() - max(60, settings.EXPORT_DOWNLOAD_HANDOFF_GRACE_SECONDS)
+            for path in export_dir.glob(".student-download-handoff-*.zip"):
+                try:
+                    if path.stat().st_mtime < handoff_before:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    continue
             for pattern in ("student-export-*.zip", "student-export-source-*"):
                 for path in export_dir.glob(pattern):
                     try:

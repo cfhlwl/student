@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
@@ -351,3 +352,109 @@ def test_delete_rejects_path_outside_export_root_and_running_job(client, setting
         assert ExportJob.objects.filter(pk=linked.pk).exists()
         assert outside.read_bytes() == b"protected"
         assert symlink.is_symlink()
+
+
+def _completed_delete_fixture(settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "state.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "state.lock"
+    write_state("open")
+    export_dir = Path(settings.EXPORT_TEMP_DIR)
+    export_dir.mkdir(parents=True)
+    archive = export_dir / "export-job-delete-failure.zip"
+    archive.write_bytes(b"retained archive")
+    job = ExportJob.objects.create(
+        fingerprint="9" * 64,
+        data_snapshot="a" * 64,
+        file_path=str(archive),
+        status="completed",
+        student_count=2,
+        total_count=2,
+        processed_count=2,
+    )
+    return job, archive
+
+
+@pytest.mark.django_db
+def test_delete_audit_failure_restores_job_and_zip(client, settings, tmp_path, monkeypatch):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    admin = User.objects.create_user(username="audit-failure-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+
+    def fail_audit(*args, **kwargs):
+        raise OSError("audit database unavailable")
+
+    monkeypatch.setattr(AuditLog.objects, "create", fail_audit)
+    response = client.post(reverse("admin-export-delete", args=[job.pk]))
+    job.refresh_from_db()
+    assert response.status_code == 302
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
+def test_delete_transaction_failure_restores_job_and_zip(client, settings, tmp_path, monkeypatch):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    admin = User.objects.create_user(username="commit-failure-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    real_atomic = transaction.atomic
+
+    class CommitFailure:
+        def __enter__(self):
+            self.context = real_atomic()
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            result = self.context.__exit__(exc_type, exc_value, traceback)
+            if exc_type is None:
+                raise RuntimeError("simulated transaction commit failure")
+            return result
+
+    monkeypatch.setattr("collector.views.transaction.atomic", lambda: CommitFailure())
+    response = client.post(reverse("admin-export-delete", args=[job.pk]))
+    job.refresh_from_db()
+    assert response.status_code == 302
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
+def test_delete_file_failure_restores_job_and_zip(client, settings, tmp_path, monkeypatch):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    admin = User.objects.create_user(username="file-failure-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    real_unlink = Path.unlink
+
+    def fail_quarantine_unlink(path, *args, **kwargs):
+        if path.name.startswith(".student-delete-"):
+            raise OSError("simulated file deletion failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_quarantine_unlink)
+    response = client.post(reverse("admin-export-delete", args=[job.pk]))
+    job.refresh_from_db()
+    assert response.status_code == 302
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+    assert AuditLog.objects.filter(action="delete_export_failed", target_id=str(job.pk)).exists()
+
+
+@pytest.mark.django_db
+def test_accel_handoff_survives_delete_until_cleanup(client, settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    settings.EXPORT_DOWNLOAD_HANDOFF_GRACE_SECONDS = 60
+    admin = User.objects.create_user(username="handoff-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    response = client.get(reverse("admin-export-download", args=[job.pk]))
+    assert response.status_code == 200
+    handoff = settings.EXPORT_TEMP_DIR / Path(response["X-Accel-Redirect"]).name
+    assert handoff.is_file()
+
+    assert client.post(reverse("admin-export-delete", args=[job.pk])).status_code == 302
+    assert not archive.exists()
+    assert handoff.is_file()
+
+    old_time = timezone.now().timestamp() - 61
+    os.utime(handoff, (old_time, old_time))
+    cleanup_export_jobs()
+    assert not handoff.exists()

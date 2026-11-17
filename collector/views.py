@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import secrets
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -638,40 +640,94 @@ def admin_export_job_status(request, job_id):
     return JsonResponse(payload)
 
 
+def _export_job_snapshot(job):
+    return {field.attname: getattr(job, field.attname) for field in job._meta.concrete_fields}
+
+
+def _restore_export_job(snapshot):
+    if ExportJob.objects.filter(pk=snapshot["id"]).exists():
+        return
+    restored = ExportJob.objects.create(**snapshot)
+    ExportJob.objects.filter(pk=restored.pk).update(
+        created_at=snapshot["created_at"],
+        updated_at=snapshot["updated_at"],
+    )
+
+
+def _validated_export_path(file_path):
+    if not file_path:
+        return None
+    path = Path(file_path)
+    if path.is_symlink():
+        raise ValueError("导出文件不能是符号链接")
+    export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(export_root)
+    except ValueError as exc:
+        raise ValueError("导出文件路径无效") from exc
+    return resolved
+
+
 @require_POST
 @staff_required
 def admin_export_delete(request, job_id):
+    quarantine = None
+    source_path = None
+    snapshot = None
     try:
         with collection_write_gate():
-            with transaction.atomic():
-                job = get_object_or_404(ExportJob.objects.select_for_update(), pk=job_id)
-                if job.status in {"queued", "running"}:
-                    messages.error(request, "生成中的导出任务不能删除，请等待任务结束。")
+            job = get_object_or_404(ExportJob.objects.select_for_update(), pk=job_id)
+            if job.status in {"queued", "running"}:
+                messages.error(request, "生成中的导出任务不能删除，请等待任务结束。")
+                return redirect("admin-exports")
+            source_path = _validated_export_path(job.file_path)
+            if job.status == "completed" and (source_path is None or not source_path.is_file()):
+                messages.error(request, "已完成导出文件不存在，未删除任务记录。")
+                return redirect("admin-exports")
+            snapshot = _export_job_snapshot(job)
+            if source_path is not None:
+                quarantine = source_path.with_name(f".student-delete-{job.pk}-{secrets.token_hex(12)}.zip")
+                os.replace(source_path, quarantine)
+            try:
+                with transaction.atomic():
+                    AuditLog.objects.create(
+                        actor=request.user,
+                        action="delete_export",
+                        target_type="ExportJob",
+                        target_id=str(job.pk),
+                        detail={"status": job.status, "student_count": job.student_count},
+                        ip_address=client_ip(request),
+                    )
+                    job.delete()
+            except Exception:
+                if quarantine is not None and quarantine.exists():
+                    os.replace(quarantine, source_path)
+                _restore_export_job(snapshot)
+                raise
+            if quarantine is not None:
+                try:
+                    quarantine.unlink(missing_ok=True)
+                except OSError:
+                    # The database transaction is already committed. Restore
+                    # both the file and the row so a failed physical delete
+                    # cannot leave a completed task without its ZIP.
+                    os.replace(quarantine, source_path)
+                    _restore_export_job(snapshot)
+                    AuditLog.objects.create(
+                        actor=request.user,
+                        action="delete_export_failed",
+                        target_type="ExportJob",
+                        target_id=str(snapshot["id"]),
+                        detail={"reason": "文件删除失败，已恢复任务和 ZIP"},
+                        ip_address=client_ip(request),
+                    )
+                    messages.error(request, "ZIP 删除失败，已恢复原导出任务。")
                     return redirect("admin-exports")
-                path = Path(job.file_path) if job.file_path else None
-                if path:
-                    export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
-                    try:
-                        path.resolve().relative_to(export_root)
-                    except ValueError:
-                        messages.error(request, "导出文件路径无效，未删除任务。")
-                        return redirect("admin-exports")
-                    try:
-                        path.unlink(missing_ok=True)
-                    except OSError as exc:
-                        messages.error(request, f"导出文件删除失败：{exc}")
-                        return redirect("admin-exports")
-                AuditLog.objects.create(
-                    actor=request.user,
-                    action="delete_export",
-                    target_type="ExportJob",
-                    target_id=str(job.pk),
-                    detail={"status": job.status, "student_count": job.student_count},
-                    ip_address=client_ip(request),
-                )
-                job.delete()
     except MaintenanceError as exc:
         messages.error(request, str(exc))
+    except Exception as exc:
+        messages.error(request, f"导出删除失败，ZIP 已保留：{exc}")
     else:
         messages.success(request, "导出任务及其 ZIP 已删除。")
     return redirect("admin-exports")
@@ -683,26 +739,35 @@ def admin_export_download(request, job_id):
     try:
         with collection_write_gate():
             job = get_object_or_404(ExportJob, pk=job_id, status="completed")
-            path = Path(job.file_path)
-            export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
             try:
-                path.resolve().relative_to(export_root)
+                path = _validated_export_path(job.file_path)
             except ValueError:
                 raise Http404
-            if not path.is_file():
+            if path is None or not path.is_file():
                 raise Http404
+            export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
+            handoff = export_root / f".student-download-handoff-{job.pk}-{secrets.token_hex(12)}.zip"
+            try:
+                # Nginx opens X-Accel-Redirect after Django returns. A hard
+                # link makes that handoff independent from deletion of the
+                # task's original directory entry.
+                os.link(path, handoff)
+                os.utime(handoff, None)
+            except OSError as exc:
+                handoff.unlink(missing_ok=True)
+                return HttpResponse(f"导出下载准备失败：{exc}", status=503, content_type="text/plain; charset=utf-8")
             AuditLog.objects.create(
                 actor=request.user,
                 action="download_export",
                 target_type="ExportJob",
                 target_id=str(job.pk),
-                detail={"student_count": job.student_count},
+                detail={"student_count": job.student_count, "handoff_file": handoff.name},
                 ip_address=client_ip(request),
             )
             response = HttpResponse(content_type="application/zip")
             response["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(job.file_name)
             response["Content-Length"] = str(path.stat().st_size)
-            response["X-Accel-Redirect"] = "/_protected-exports/" + quote(path.name)
+            response["X-Accel-Redirect"] = "/_protected-exports/" + quote(handoff.name)
             response["Cache-Control"] = "private, no-store"
             return response
     except MaintenanceError as exc:
