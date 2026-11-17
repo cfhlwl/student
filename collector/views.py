@@ -25,7 +25,7 @@ from .models import AppSetting, AuditLog, ClassGroup, ExportJob, NamingRule, Pho
 from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, face_quality_detection_enabled, read_face_quality_policy
 from .preflight import run_preflight
 from .export_jobs import ExportQueueFull, enqueue_export_job
-from .services import ValidationError, create_photo_supplement, create_submission, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, send_resubmission_notice, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
+from .services import EXPORT_MODE_FACE_DEVICE, EXPORT_MODE_ORIGINAL, ValidationError, create_photo_supplement, create_submission, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, send_resubmission_notice, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 from .statistics import build_admin_statistics_context, build_exception_workbook
 
 
@@ -575,13 +575,15 @@ def protected_document(request, document_id):
 
 @require_GET
 @staff_required
-def export_zip(request):
+def _queue_export_zip(request, export_mode=EXPORT_MODE_ORIGINAL):
     # An empty query string still means "export all adopted data". Passing
     # None creates an unbound form, whose is_valid() is always False.
     form = ExportFilterForm(request.GET)
     if not form.is_valid():
         return JsonResponse({"errors": form.errors}, status=400)
     filters = filter_values(form)
+    if export_mode != EXPORT_MODE_ORIGINAL:
+        filters["export_mode"] = export_mode
     if form.cleaned_data.get("has_photo"): filters["has_photo"] = form.cleaned_data["has_photo"]
     try:
         job = enqueue_export_job(filters, actor=request.user, ip_address=client_ip(request))
@@ -592,6 +594,14 @@ def export_zip(request):
     if request.headers.get("Accept") == "application/json":
         return JsonResponse({"job_id": job.pk, "status": job.status, "status_url": reverse("admin-export-status", args=[job.pk])}, status=202)
     return redirect("admin-export-status", job_id=job.pk)
+
+
+def export_zip(request):
+    return _queue_export_zip(request, EXPORT_MODE_ORIGINAL)
+
+
+def export_face_zip(request):
+    return _queue_export_zip(request, EXPORT_MODE_FACE_DEVICE)
 
 
 @require_GET

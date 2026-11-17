@@ -4,7 +4,7 @@ from .password_views import admin_password_change
 
 from .views import (
     StaffLoginView, StaffLogoutView, admin_classes, admin_dashboard, admin_export_download, admin_export_job_status, admin_export_status, admin_naming, admin_statistics, admin_statistics_exceptions, admin_students,
-    admin_submissions, clear_test_data, download_template, export_zip, manual_match, manual_supplement_match, notify_resubmission, protected_document, protected_photo, public_submit, review_submission, review_supplement, submission_preview, submit_preflight, submit_preflight_page, submit_result, submit_supplement, toggle_photo_quality, toggle_photo_quality_detection, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start, upload_status,
+    admin_submissions, clear_test_data, download_template, export_face_zip, export_zip, manual_match, manual_supplement_match, notify_resubmission, protected_document, protected_photo, public_submit, review_submission, review_supplement, submission_preview, submit_preflight, submit_preflight_page, submit_result, submit_supplement, toggle_photo_quality, toggle_photo_quality_detection, toggle_upload, upload_complete, upload_document_batch, upload_photo_batch, upload_start, upload_status,
 )
 
 urlpatterns = [
@@ -36,6 +36,7 @@ urlpatterns = [
     path("admin/files/photos/<int:photo_id>/", protected_photo, name="protected-photo"),
     path("admin/files/documents/<int:document_id>/", protected_document, name="protected-document"),
     path("admin/export.zip", export_zip, name="export-zip"),
+    path("admin/export-face.zip", export_face_zip, name="export-face-zip"),
     path("admin/export/<int:job_id>/", admin_export_status, name="admin-export-status"),
     path("admin/export/<int:job_id>/status/", admin_export_job_status, name="admin-export-job-status"),
     path("admin/export/<int:job_id>/download/", admin_export_download, name="admin-export-download"),

@@ -12,7 +12,8 @@ from django.utils import timezone
 
 from .maintenance import MaintenanceError, collection_write_gate
 from .models import AppSetting, ExportJob, NamingRule, Student, StudentPhoto, Submission, SubmissionDocument
-from .services import export_students_to_tempfile, validate_naming_rule
+from .face_export import DEVICE_EXPORT_PROFILE_VERSION, DEVICE_MAX_BYTES, DEVICE_FACE_HEIGHT_RATIO, DEVICE_FACE_MIN_PIXELS
+from .services import EXPORT_MODE_FACE_DEVICE, EXPORT_MODE_ORIGINAL, export_students_to_tempfile, validate_naming_rule
 
 
 EXPORT_FILE_NAME = "学生资料导出.zip"
@@ -36,7 +37,7 @@ def _export_options():
     layout = AppSetting.get_value("export_layout", "by_class")
     if layout not in {"by_class", "by_study_type"}:
         layout = "by_class"
-    return {
+    options = {
         "mode": rule.mode,
         "template": rule.template,
         "male_code": rule.male_code,
@@ -44,6 +45,11 @@ def _export_options():
         "separator": rule.separator,
         "layout": layout,
     }
+    return options
+
+
+def export_file_name(filters):
+    return "人脸识别设备资料.zip" if filters.get("export_mode") == EXPORT_MODE_FACE_DEVICE else EXPORT_FILE_NAME
 
 
 def build_export_snapshot(filters):
@@ -127,12 +133,28 @@ def build_export_snapshot(filters):
 
 def build_export_fingerprint(filters, snapshot=None):
     snapshot = snapshot or build_export_snapshot(filters)
-    payload = {"filters": filters, "options": _export_options(), "data_snapshot": snapshot}
+    options = _export_options()
+    if filters.get("export_mode") == EXPORT_MODE_FACE_DEVICE:
+        options["device_profile"] = {
+            "version": DEVICE_EXPORT_PROFILE_VERSION,
+            "max_bytes": DEVICE_MAX_BYTES,
+            "min_face_pixels": DEVICE_FACE_MIN_PIXELS,
+            "min_face_height_ratio": DEVICE_FACE_HEIGHT_RATIO,
+        }
+    payload = {"filters": filters, "options": options, "data_snapshot": snapshot}
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest(), snapshot
 
 
 def enqueue_export_job(filters, actor=None, ip_address=None):
+    filters = dict(filters)
+    export_mode = filters.get("export_mode", EXPORT_MODE_ORIGINAL)
+    if export_mode not in {EXPORT_MODE_ORIGINAL, EXPORT_MODE_FACE_DEVICE}:
+        raise ValueError("导出模式不正确")
+    if export_mode == EXPORT_MODE_ORIGINAL:
+        filters.pop("export_mode", None)
+    else:
+        filters["export_mode"] = export_mode
     with collection_write_gate():
         fingerprint, snapshot = build_export_fingerprint(filters)
         now = timezone.now()
@@ -151,6 +173,7 @@ def enqueue_export_job(filters, actor=None, ip_address=None):
                 job.file_path = ""
                 job.student_count = 0
                 job.preview = []
+                job.file_name = export_file_name(filters)
                 job.started_at = None
                 job.completed_at = None
                 job.expires_at = None
@@ -172,6 +195,7 @@ def enqueue_export_job(filters, actor=None, ip_address=None):
                     data_snapshot=snapshot,
                     requested_by=actor,
                     requested_ip=ip_address,
+                    file_name=export_file_name(filters),
                     expires_at=now + retention,
                 )
             except IntegrityError:
