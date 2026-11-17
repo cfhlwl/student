@@ -16,6 +16,11 @@ from .services import export_students_to_tempfile, validate_naming_rule
 
 
 EXPORT_FILE_NAME = "学生资料导出.zip"
+# The archive is served by nginx through an internal X-Accel-Redirect. The
+# worker runs as root while nginx workers run as uid 101, so a mkstemp-created
+# 0600 archive cannot be read by nginx. Keep the URL protected by nginx's
+# `internal` location, but make the completed file readable by its consumer.
+EXPORT_FILE_MODE = 0o644
 
 
 class ExportQueueFull(Exception):
@@ -203,6 +208,11 @@ def _mark_stale(job, token, message):
     )
 
 
+def _make_export_file_readable(path):
+    """Publish an archive that nginx can read without exposing its URL."""
+    os.chmod(path, EXPORT_FILE_MODE)
+
+
 def process_export_job(job):
     token = job.lease_token
     final_path = Path(settings.EXPORT_TEMP_DIR) / f"export-job-{job.pk}-{token}.zip"
@@ -227,6 +237,9 @@ def process_export_job(job):
             Path(settings.EXPORT_TEMP_DIR).mkdir(parents=True, exist_ok=True)
             os.replace(temp_path, final_path)
             temp_path = None
+            # Publish permissions before recording the completed path. If this
+            # fails, the job is failed and no unreadable download link is saved.
+            _make_export_file_readable(final_path)
             expires_at = timezone.now() + timedelta(hours=max(1, settings.EXPORT_RETENTION_HOURS))
             updated = ExportJob.objects.filter(
                 pk=job.pk, status="running", lease_token=token, attempt=job.attempt,

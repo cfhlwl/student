@@ -1,4 +1,5 @@
 import io
+import stat
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -88,6 +89,7 @@ def test_async_export_tolerates_missing_original_roster(settings, tmp_path):
     process_export_job(claim_next_export_job())
     job.refresh_from_db()
     assert job.status == "completed"
+    assert stat.S_IMODE(Path(job.file_path).stat().st_mode) & 0o004
     with zipfile.ZipFile(job.file_path) as archive:
         assert archive.testzip() is None
         stats_name = next(name for name in archive.namelist() if name.endswith("学生统计表.xlsx"))
