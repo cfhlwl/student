@@ -1,4 +1,5 @@
 import io
+import os
 import stat
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
@@ -15,7 +17,7 @@ from openpyxl import load_workbook
 from collector.backup import clear_collection_safely
 from collector.export_jobs import claim_next_export_job, cleanup_export_jobs, enqueue_export_job, process_export_job
 from collector.maintenance import write_state
-from collector.models import ClassGroup, ExportJob, SchoolYear, Student, Submission
+from collector.models import AuditLog, ClassGroup, ExportJob, SchoolYear, Student, Submission
 
 
 def approved_student(name="张三"):
@@ -73,6 +75,26 @@ def test_export_snapshot_changes_after_new_approved_student(settings, tmp_path):
     assert second.status == "completed"
     assert second.student_count == 2
     assert Path(second.file_path).is_file()
+
+
+@pytest.mark.django_db
+def test_completed_export_can_be_repeated_and_old_zip_is_retained(settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "state.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "state.lock"
+    write_state("open")
+    approved_student()
+    first = enqueue_export_job({})
+    process_export_job(claim_next_export_job())
+    first.refresh_from_db()
+    second = enqueue_export_job({})
+    assert second.pk != first.pk
+    assert Path(first.file_path).is_file()
+    process_export_job(claim_next_export_job())
+    second.refresh_from_db()
+    assert second.status == "completed"
+    assert Path(second.file_path).is_file()
+    assert ExportJob.objects.filter(status="completed").count() == 2
 
 
 @pytest.mark.django_db
@@ -192,3 +214,311 @@ def test_clear_revokes_export_jobs_and_removes_archives(settings, tmp_path):
     assert not ExportJob.objects.filter(pk=job.pk).exists()
     assert not archive.exists()
     assert not list(archive_dir.glob("*.zip"))
+
+
+@pytest.mark.django_db
+def test_admin_export_download_center_deletes_only_selected_zip(client, settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "state.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "state.lock"
+    write_state("open")
+    archive_dir = Path(settings.EXPORT_TEMP_DIR)
+    archive_dir.mkdir(parents=True)
+    archive = archive_dir / "export-job-1-retained.zip"
+    archive.write_bytes(b"synthetic zip")
+    job = ExportJob.objects.create(
+        fingerprint="d" * 64,
+        data_snapshot="e" * 64,
+        file_path=str(archive),
+        status="completed",
+        student_count=1,
+        total_count=1,
+        processed_count=1,
+    )
+    admin = User.objects.create_user(username="download-center-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    page = client.get(reverse("admin-exports"))
+    assert page.status_code == 200
+    assert f"#{job.pk}" in page.content.decode()
+    response = client.post(reverse("admin-export-delete", args=[job.pk]))
+    assert response.status_code == 302
+    assert not ExportJob.objects.filter(pk=job.pk).exists()
+    assert not archive.exists()
+    assert AuditLog.objects.filter(action="delete_export", target_id=str(job.pk)).exists()
+
+
+@pytest.mark.django_db
+def test_cleanup_keeps_completed_zip_until_admin_deletes_it(settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "state.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "state.lock"
+    write_state("open")
+    archive_dir = Path(settings.EXPORT_TEMP_DIR)
+    archive_dir.mkdir(parents=True)
+    archive = archive_dir / "export-job-retained.zip"
+    archive.write_bytes(b"synthetic zip")
+    job = ExportJob.objects.create(
+        fingerprint="e" * 64,
+        data_snapshot="f" * 64,
+        file_path=str(archive),
+        status="completed",
+        expires_at=timezone.now() - timedelta(days=1),
+    )
+    cleanup_export_jobs()
+    job.refresh_from_db()
+    assert job.status == "completed"
+    assert Path(job.file_path).is_file()
+
+
+@pytest.mark.django_db
+def test_disk_full_fails_new_job_without_touching_retained_zip(monkeypatch, settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "state.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "state.lock"
+    write_state("open")
+    approved_student()
+    old_dir = Path(settings.EXPORT_TEMP_DIR)
+    old_dir.mkdir(parents=True)
+    old_archive = old_dir / "export-job-old-retained.zip"
+    old_archive.write_bytes(b"old archive")
+    old_job = ExportJob.objects.create(
+        fingerprint="1" * 64,
+        data_snapshot="2" * 64,
+        file_path=str(old_archive),
+        status="completed",
+    )
+    new_job = enqueue_export_job({})
+    claimed = claim_next_export_job()
+
+    def no_space(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("collector.export_jobs.export_students_to_tempfile", no_space)
+    process_export_job(claimed)
+    new_job.refresh_from_db()
+    old_job.refresh_from_db()
+    assert new_job.status == "failed"
+    assert "No space left on device" in new_job.error
+    assert old_job.status == "completed"
+    assert old_archive.read_bytes() == b"old archive"
+
+
+@pytest.mark.django_db
+def test_delete_rejects_path_outside_export_root_and_running_job(client, settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "state.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "state.lock"
+    write_state("open")
+    export_dir = Path(settings.EXPORT_TEMP_DIR)
+    export_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.zip"
+    outside.write_bytes(b"protected")
+    completed = ExportJob.objects.create(
+        fingerprint="3" * 64,
+        data_snapshot="4" * 64,
+        file_path=str(export_dir / ".." / "outside.zip"),
+        status="completed",
+    )
+    running_archive = export_dir / "running.zip"
+    running_archive.write_bytes(b"running")
+    running = ExportJob.objects.create(
+        fingerprint="5" * 64,
+        data_snapshot="6" * 64,
+        file_path=str(running_archive),
+        status="running",
+    )
+    admin = User.objects.create_user(username="delete-safety-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    assert client.post(reverse("admin-export-delete", args=[completed.pk])).status_code == 302
+    assert ExportJob.objects.filter(pk=completed.pk).exists()
+    assert outside.read_bytes() == b"protected"
+    assert client.post(reverse("admin-export-delete", args=[running.pk])).status_code == 302
+    assert ExportJob.objects.filter(pk=running.pk).exists()
+    assert running_archive.read_bytes() == b"running"
+
+    symlink = export_dir / "linked.zip"
+    try:
+        os.symlink(outside, symlink)
+    except (OSError, NotImplementedError):
+        symlink = None
+    if symlink is not None:
+        linked = ExportJob.objects.create(
+            fingerprint="7" * 64,
+            data_snapshot="8" * 64,
+            file_path=str(symlink),
+            status="completed",
+        )
+        assert client.post(reverse("admin-export-delete", args=[linked.pk])).status_code == 302
+        assert ExportJob.objects.filter(pk=linked.pk).exists()
+        assert outside.read_bytes() == b"protected"
+        assert symlink.is_symlink()
+
+
+def _completed_delete_fixture(settings, tmp_path):
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    settings.COLLECTION_MAINTENANCE_STATE_PATH = tmp_path / "state.json"
+    settings.COLLECTION_MAINTENANCE_LOCK_PATH = tmp_path / "state.lock"
+    write_state("open")
+    export_dir = Path(settings.EXPORT_TEMP_DIR)
+    export_dir.mkdir(parents=True)
+    archive = export_dir / "export-job-delete-failure.zip"
+    archive.write_bytes(b"retained archive")
+    job = ExportJob.objects.create(
+        fingerprint="9" * 64,
+        data_snapshot="a" * 64,
+        file_path=str(archive),
+        status="completed",
+        student_count=2,
+        total_count=2,
+        processed_count=2,
+    )
+    return job, archive
+
+
+@pytest.mark.django_db
+def test_delete_audit_failure_restores_job_and_zip(client, settings, tmp_path, monkeypatch):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    admin = User.objects.create_user(username="audit-failure-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+
+    def fail_audit(*args, **kwargs):
+        raise OSError("audit database unavailable")
+
+    monkeypatch.setattr(AuditLog.objects, "create", fail_audit)
+    response = client.post(reverse("admin-export-delete", args=[job.pk]))
+    job.refresh_from_db()
+    assert response.status_code == 302
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
+def test_delete_transaction_failure_restores_job_and_zip(client, settings, tmp_path, monkeypatch):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    admin = User.objects.create_user(username="commit-failure-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    real_atomic = transaction.atomic
+
+    class CommitFailure:
+        def __enter__(self):
+            self.context = real_atomic()
+            return self.context.__enter__()
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            result = self.context.__exit__(exc_type, exc_value, traceback)
+            if exc_type is None:
+                raise RuntimeError("simulated transaction commit failure")
+            return result
+
+    monkeypatch.setattr("collector.views.transaction.atomic", lambda: CommitFailure())
+    response = client.post(reverse("admin-export-delete", args=[job.pk]))
+    job.refresh_from_db()
+    assert response.status_code == 302
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
+def test_delete_file_failure_restores_job_and_zip(client, settings, tmp_path, monkeypatch):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    admin = User.objects.create_user(username="file-failure-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    real_unlink = Path.unlink
+
+    def fail_quarantine_unlink(path, *args, **kwargs):
+        if path.name.startswith(".student-delete-"):
+            raise OSError("simulated file deletion failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_quarantine_unlink)
+    response = client.post(reverse("admin-export-delete", args=[job.pk]))
+    job.refresh_from_db()
+    assert response.status_code == 302
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+    assert AuditLog.objects.filter(action="delete_export_failed", target_id=str(job.pk)).exists()
+
+
+@pytest.mark.django_db
+def test_delete_quarantine_recovers_after_precommit_interrupt(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'a' * 24}.zip")
+    os.replace(archive, quarantine)
+
+    # This is the state left by a process dying after os.replace and before
+    # the transaction can commit: the DB row remains, but its source path is
+    # absent. The worker must restore the original entry without overwriting.
+    cleanup_export_jobs()
+    job.refresh_from_db()
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+    assert not quarantine.exists()
+
+    # A second worker pass is a no-op and remains safe.
+    cleanup_export_jobs()
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
+def test_delete_quarantine_cleans_after_postcommit_interrupt(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'b' * 24}.zip")
+    os.replace(archive, quarantine)
+    job.delete()
+
+    # This is the state left by a process dying after the DB commit and before
+    # the physical unlink. The task is gone, so only the exact orphan
+    # quarantine entry may be removed.
+    cleanup_export_jobs()
+    assert not quarantine.exists()
+    assert not archive.exists()
+    assert not ExportJob.objects.filter(pk=job.pk).exists()
+
+
+@pytest.mark.django_db
+def test_delete_quarantine_never_overwrites_existing_zip(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'c' * 24}.zip")
+    quarantine.write_bytes(b"stale quarantine")
+
+    cleanup_export_jobs()
+    assert archive.read_bytes() == b"retained archive"
+    assert not quarantine.exists()
+
+
+@pytest.mark.django_db
+def test_delete_quarantine_does_not_follow_symlink(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    outside = tmp_path / "outside.zip"
+    outside.write_bytes(b"outside archive")
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'d' * 24}.zip")
+    try:
+        os.symlink(outside, quarantine)
+    except (OSError, NotImplementedError):
+        return
+
+    cleanup_export_jobs()
+    assert quarantine.is_symlink()
+    assert outside.read_bytes() == b"outside archive"
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
+def test_accel_handoff_survives_delete_until_cleanup(client, settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    settings.EXPORT_DOWNLOAD_HANDOFF_GRACE_SECONDS = 60
+    admin = User.objects.create_user(username="handoff-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    response = client.get(reverse("admin-export-download", args=[job.pk]))
+    assert response.status_code == 200
+    handoff = settings.EXPORT_TEMP_DIR / Path(response["X-Accel-Redirect"]).name
+    assert handoff.is_file()
+
+    assert client.post(reverse("admin-export-delete", args=[job.pk])).status_code == 302
+    assert not archive.exists()
+    assert handoff.is_file()
+
+    old_time = timezone.now().timestamp() - 61
+    os.utime(handoff, (old_time, old_time))
+    cleanup_export_jobs()
+    assert not handoff.exists()

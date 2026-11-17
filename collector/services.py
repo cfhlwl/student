@@ -1467,7 +1467,7 @@ def _stage_export_file(file_field, *, expected_size=None, expected_sha256=""):
         raise ExportFileError(str(exc)) from exc
 
 
-def export_students_to_tempfile(filters, actor=None, ip_address=None):
+def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_callback=None):
     export_mode = filters.get("export_mode", EXPORT_MODE_ORIGINAL)
     if export_mode not in {EXPORT_MODE_ORIGINAL, EXPORT_MODE_FACE_DEVICE}:
         raise ValidationError("导出模式不正确")
@@ -1490,6 +1490,7 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     fd, temp_name = tempfile.mkstemp(prefix="student-export-", suffix=".zip", dir=settings.EXPORT_TEMP_DIR)
     os.close(fd)
     anomalies_total = []
+    processed_count = 0
     # Keep the archive layout stable even when the admin filters to one type.
     # This makes every export self-describing and keeps photos under the
     # corresponding 走读/半走读/住宿 directory.
@@ -1504,6 +1505,8 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
     else:
         export_groups = list(groups.items())
     try:
+        if progress_callback:
+            progress_callback(0, len(students))
         with zipfile.ZipFile(temp_name, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
             for group_key, group_students in export_groups:
                 if export_layout == "by_study_type":
@@ -1603,6 +1606,9 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None):
                                     device_photo.unlink(missing_ok=True)
                         else:
                             photo_anomalies.append((student.get_match_status_display(), student.name, "没有可导出的已匹配照片"))
+                        processed_count += 1
+                        if progress_callback:
+                            progress_callback(processed_count, len(students))
                     archive.writestr(f"{category_dir}/学生统计表.xlsx", _write_workbook(category_students, f"{category_dir}", photo_anomalies + class_file_anomalies))
                     anomalies_total.extend(photo_anomalies)
                 anomalies_total.extend(class_file_anomalies)

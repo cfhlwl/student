@@ -326,7 +326,7 @@ class ExportJob(models.Model):
         ("stale", "已失效"),
     ]
 
-    fingerprint = models.CharField(max_length=64, unique=True)
+    fingerprint = models.CharField(max_length=64)
     filters = models.JSONField(default=dict)
     data_snapshot = models.CharField(max_length=64, default="")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="queued")
@@ -335,6 +335,8 @@ class ExportJob(models.Model):
     file_path = models.CharField(max_length=500, blank=True)
     file_name = models.CharField(max_length=255, default="学生资料导出.zip")
     student_count = models.PositiveIntegerField(default=0)
+    total_count = models.PositiveIntegerField(default=0)
+    processed_count = models.PositiveIntegerField(default=0)
     preview = models.JSONField(default=list, blank=True)
     error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -349,5 +351,6 @@ class ExportJob(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["status", "created_at"], name="export_job_status_created_idx"),
+            models.Index(fields=["fingerprint", "status"], name="export_job_fp_status_idx"),
         ]
 

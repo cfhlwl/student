@@ -193,7 +193,9 @@ def test_export_jobs_are_singleflight_and_stream_download_through_nginx(client, 
     client.force_login(admin)
     response = client.get(reverse("admin-export-download", args=[job.pk]))
     assert response.status_code == 200
-    assert response["X-Accel-Redirect"].startswith("/_protected-exports/export-job-")
+    assert response["X-Accel-Redirect"].startswith("/_protected-exports/.student-download-handoff-")
+    handoff = settings.EXPORT_TEMP_DIR / Path(response["X-Accel-Redirect"]).name
+    assert handoff.is_file()
     assert response["Content-Length"] == str(Path(job.file_path).stat().st_size)
 
 

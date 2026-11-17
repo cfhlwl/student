@@ -1,20 +1,27 @@
 {% extends 'collector/admin_base.html' %}
+{% load static %}
 {% block title %}导出任务 · {{ site_name }}{% endblock %}
+{% block head_extra %}<link rel="stylesheet" href="{% static 'css/admin_exports.css' %}?v=20261117-1">{% endblock %}
 {% block admin_content %}
 <section class="panel export-status" data-status-url="{% url 'admin-export-job-status' job.pk %}">
   <div class="eyebrow">后台导出 / 独立任务</div>
   <h1>导出任务</h1>
   <p id="export-status-text">{{ job.get_status_display }}，请不要重复点击导出。</p>
+  <div class="export-progress export-status-progress" id="export-progress-wrap"{% if not job.total_count %} hidden{% endif %}>
+    <progress id="export-progress" max="{{ job.total_count|default:1 }}" value="{{ job.processed_count }}"></progress>
+    <span id="export-progress-label">{{ job.processed_count }} / {{ job.total_count }} 人</span>
+  </div>
   <div id="export-result" hidden>
     <p>已生成 <strong id="export-count">0</strong> 名学生的资料。</p>
     <a id="export-download" class="button primary" href="#">下载 ZIP →</a>
+    <a class="button ghost" href="{% url 'admin-exports' %}">进入下载菜单</a>
   </div>
   <div id="export-stale" hidden>
     <p>学生资料已更新，请重新导出。</p>
     <a class="button primary" href="{% url 'admin-students' %}">重新导出 →</a>
   </div>
   <div id="export-error" class="error-message" hidden></div>
-  <p><a class="text-link" href="{% url 'admin-students' %}">返回学生资料与导出</a></p>
+  <p><a class="text-link" href="{% url 'admin-exports' %}">导出下载菜单</a><span class="dot">·</span><a class="text-link" href="{% url 'admin-students' %}">返回学生资料与导出</a></p>
 </section>
 <script>
 (() => {
@@ -24,12 +31,21 @@
   const count = document.getElementById('export-count');
   const download = document.getElementById('export-download');
   const error = document.getElementById('export-error');
+  const progressWrap = document.getElementById('export-progress-wrap');
+  const progress = document.getElementById('export-progress');
+  const progressLabel = document.getElementById('export-progress-label');
   const poll = async () => {
     try {
       const response = await fetch(root.dataset.statusUrl, {headers: {Accept: 'application/json'}, credentials: 'same-origin'});
       if (!response.ok) throw new Error('状态查询失败');
       const data = await response.json();
-      text.textContent = data.status === 'completed' ? '导出已完成。' : `${data.status_label}，请不要重复点击导出。`;
+      if (data.total_count) {
+        progressWrap.hidden = false;
+        progress.max = data.total_count;
+        progress.value = data.processed_count;
+        progressLabel.textContent = `${data.processed_count} / ${data.total_count} 人`;
+      }
+      text.textContent = data.status === 'completed' ? '导出已完成，ZIP 已保留在下载菜单中。' : `${data.status_label}，请不要重复点击导出。`;
       if (data.status === 'completed') {
         count.textContent = data.student_count;
         download.href = data.download_url;
