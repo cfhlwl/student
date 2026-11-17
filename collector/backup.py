@@ -16,7 +16,7 @@ from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 from django.conf import settings
 from django.db import transaction
 
-from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, UploadSession
+from .models import AppSetting, AuditLog, ClassGroup, ExportJob, NamingRule, PhotoSupplement, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, UploadSession
 from .maintenance import collection_maintenance_gate, write_state
 
 
@@ -231,14 +231,25 @@ def clear_collection_safely(backup_path: str | Path, *, database_path: str | Pat
     database_name = str(database_path or settings.DATABASES["default"]["NAME"])
     database = Path(database_name).resolve() if not database_name.startswith("file:") else None
     media = Path(media_root or settings.MEDIA_ROOT).resolve()
+    export_dir = Path(settings.EXPORT_TEMP_DIR).resolve()
     with collection_maintenance_gate() as previous_state:
         previous_gate = AppSetting.get_value("public_upload_open", "__missing__")
         create_backup(backup_path, database_path=database, media_root=media, assume_maintenance_lock=True)
         backup_created = True
         AppSetting.set_value("public_upload_open", "false")
         quarantine = media / f".clear-quarantine-{uuid.uuid4().hex}"
+        export_quarantine = export_dir / f".clear-export-quarantine-{uuid.uuid4().hex}"
         moved = []
+        moved_exports = []
         try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+            export_quarantine.mkdir(parents=True, exist_ok=False)
+            for child in list(export_dir.iterdir()):
+                if child == export_quarantine or not child.is_file():
+                    continue
+                target = export_quarantine / child.name
+                shutil.move(str(child), str(target))
+                moved_exports.append((child, target))
             quarantine.mkdir(parents=True, exist_ok=False)
             for name in COLLECTION_MEDIA_DIRS:
                 root = media / name
@@ -247,7 +258,7 @@ def clear_collection_safely(backup_path: str | Path, *, database_path: str | Pat
                     shutil.move(str(root), str(target))
                     moved.append((root, target))
             with transaction.atomic():
-                counts = {"submissions": Submission.objects.count(), "students": Student.objects.count(), "photos": StudentPhoto.objects.count(), "documents": SubmissionDocument.objects.count(), "rosters": sum(bool(row.roster_file) for row in Submission.objects.all()), "staged_uploads": StagedUpload.objects.count(), "upload_sessions": UploadSession.objects.count(), "supplements": PhotoSupplement.objects.count()}
+                counts = {"submissions": Submission.objects.count(), "students": Student.objects.count(), "photos": StudentPhoto.objects.count(), "documents": SubmissionDocument.objects.count(), "rosters": sum(bool(row.roster_file) for row in Submission.objects.all()), "staged_uploads": StagedUpload.objects.count(), "upload_sessions": UploadSession.objects.count(), "supplements": PhotoSupplement.objects.count(), "export_jobs": ExportJob.objects.count()}
                 Submission.objects.all().delete()
                 Student.objects.all().delete()
                 PhotoSupplement.objects.all().delete()
@@ -256,12 +267,17 @@ def clear_collection_safely(backup_path: str | Path, *, database_path: str | Pat
                 ClassGroup.objects.all().delete()
                 SchoolYear.objects.all().delete()
                 NamingRule.objects.all().delete()
+                ExportJob.objects.all().delete()
                 AppSetting.objects.all().delete()
                 AuditLog.objects.all().delete()
             for name in COLLECTION_MEDIA_DIRS:
                 (media / name).mkdir(parents=True, exist_ok=True)
             write_state("closed")
             shutil.rmtree(quarantine, ignore_errors=True)
+            shutil.rmtree(export_quarantine, ignore_errors=True)
+            for child in list(export_dir.iterdir()):
+                if child.is_file():
+                    child.unlink(missing_ok=True)
             return counts
         except Exception:
             restored_from_backup = False
@@ -284,6 +300,12 @@ def clear_collection_safely(backup_path: str | Path, *, database_path: str | Pat
                         shutil.rmtree(root, ignore_errors=True)
                     if target.exists():
                         shutil.move(str(target), str(root))
+            for root, target in reversed(moved_exports):
+                if root.exists():
+                    root.unlink(missing_ok=True)
+                if target.exists():
+                    shutil.move(str(target), str(root))
             write_state(previous_state)
             shutil.rmtree(quarantine, ignore_errors=True)
+            shutil.rmtree(export_quarantine, ignore_errors=True)
             raise

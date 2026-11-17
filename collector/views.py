@@ -24,7 +24,7 @@ from .forms import ExportFilterForm, NamingRuleForm, ResubmissionNoticeForm, Sub
 from .models import AppSetting, AuditLog, ClassGroup, ExportJob, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadSession
 from .photo_quality import PhotoQualityPolicyError, face_quality_blocking_enabled, face_quality_detection_enabled, read_face_quality_policy
 from .preflight import run_preflight
-from .export_jobs import enqueue_export_job
+from .export_jobs import ExportQueueFull, enqueue_export_job
 from .services import ValidationError, create_photo_supplement, create_submission, finalize_upload_session, grade_for, match_supplement_photo, normalize_grade, normalize_school_year, review_photo_supplement, review_submission_version, send_resubmission_notice, stage_upload_batch, start_upload_session, template_bytes, upload_session_status, validate_naming_rule
 from .statistics import build_admin_statistics_context, build_exception_workbook
 
@@ -583,7 +583,12 @@ def export_zip(request):
         return JsonResponse({"errors": form.errors}, status=400)
     filters = filter_values(form)
     if form.cleaned_data.get("has_photo"): filters["has_photo"] = form.cleaned_data["has_photo"]
-    job = enqueue_export_job(filters, actor=request.user, ip_address=client_ip(request))
+    try:
+        job = enqueue_export_job(filters, actor=request.user, ip_address=client_ip(request))
+    except ExportQueueFull as exc:
+        return JsonResponse({"error": str(exc)}, status=429)
+    except MaintenanceError as exc:
+        return HttpResponse(str(exc), status=503, content_type="text/plain; charset=utf-8")
     if request.headers.get("Accept") == "application/json":
         return JsonResponse({"job_id": job.pk, "status": job.status, "status_url": reverse("admin-export-status", args=[job.pk])}, status=202)
     return redirect("admin-export-status", job_id=job.pk)
@@ -615,21 +620,33 @@ def admin_export_job_status(request, job_id):
 @require_GET
 @staff_required
 def admin_export_download(request, job_id):
-    job = get_object_or_404(ExportJob, pk=job_id, status="completed")
-    path = Path(job.file_path)
-    export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
     try:
-        path.resolve().relative_to(export_root)
-    except ValueError:
-        raise Http404
-    if not path.is_file():
-        raise Http404
-    response = HttpResponse(content_type="application/zip")
-    response["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(job.file_name)
-    response["Content-Length"] = str(path.stat().st_size)
-    response["X-Accel-Redirect"] = "/_protected-exports/" + quote(path.name)
-    response["Cache-Control"] = "private, no-store"
-    return response
+        with collection_write_gate():
+            job = get_object_or_404(ExportJob, pk=job_id, status="completed")
+            path = Path(job.file_path)
+            export_root = Path(settings.EXPORT_TEMP_DIR).resolve()
+            try:
+                path.resolve().relative_to(export_root)
+            except ValueError:
+                raise Http404
+            if not path.is_file():
+                raise Http404
+            AuditLog.objects.create(
+                actor=request.user,
+                action="download_export",
+                target_type="ExportJob",
+                target_id=str(job.pk),
+                detail={"student_count": job.student_count},
+                ip_address=client_ip(request),
+            )
+            response = HttpResponse(content_type="application/zip")
+            response["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(job.file_name)
+            response["Content-Length"] = str(path.stat().st_size)
+            response["X-Accel-Redirect"] = "/_protected-exports/" + quote(path.name)
+            response["Cache-Control"] = "private, no-store"
+            return response
+    except MaintenanceError as exc:
+        return HttpResponse(str(exc), status=503, content_type="text/plain; charset=utf-8")
 
 
 @staff_required

@@ -323,10 +323,12 @@ class ExportJob(models.Model):
         ("completed", "已完成"),
         ("failed", "失败"),
         ("expired", "已过期"),
+        ("stale", "已失效"),
     ]
 
     fingerprint = models.CharField(max_length=64, unique=True)
     filters = models.JSONField(default=dict)
+    data_snapshot = models.CharField(max_length=64, default="")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="queued")
     requested_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="export_jobs")
     requested_ip = models.GenericIPAddressField(null=True, blank=True)
@@ -340,6 +342,8 @@ class ExportJob(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    attempt = models.PositiveIntegerField(default=0)
+    lease_token = models.CharField(max_length=64, blank=True)
 
     class Meta:
         ordering = ["-created_at"]

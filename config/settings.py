@@ -84,6 +84,7 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DATA_UPLOAD_MAX_MEMORY_SIZE_MB", "4
 EXPORT_TEMP_DIR = Path(os.getenv("EXPORT_TEMP_DIR", BASE_DIR / "data" / "exports")).resolve()
 EXPORT_RETENTION_HOURS = int(os.getenv("EXPORT_RETENTION_HOURS", "2"))
 EXPORT_JOB_TIMEOUT_SECONDS = int(os.getenv("EXPORT_JOB_TIMEOUT_SECONDS", "1800"))
+EXPORT_MAX_ACTIVE_JOBS = int(os.getenv("EXPORT_MAX_ACTIVE_JOBS", "2"))
 COLLECTION_BACKUP_DIR = Path(os.getenv("COLLECTION_BACKUP_DIR", BASE_DIR / "data" / "backups")).resolve()
 COLLECTION_MAINTENANCE_LOCK_PATH = Path(os.getenv("COLLECTION_MAINTENANCE_LOCK_PATH", BASE_DIR / "data" / "collection-maintenance.lock")).resolve()
 COLLECTION_MAINTENANCE_STATE_PATH = Path(os.getenv("COLLECTION_MAINTENANCE_STATE_PATH", BASE_DIR / "data" / "collection-maintenance.json")).resolve()
