@@ -8,6 +8,7 @@ The original uploaded file is never modified.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -65,6 +66,35 @@ def _error(code: str, message: str) -> DevicePhotoError:
     return DevicePhotoError(code, message)
 
 
+def _box_area(box: tuple[int, int, int, int]) -> int:
+    return max(0, box[2]) * max(0, box[3])
+
+
+def _boxes_overlap(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
+    left = max(first[0], second[0])
+    top = max(first[1], second[1])
+    right = min(first[0] + first[2], second[0] + second[2])
+    bottom = min(first[1] + first[3], second[1] + second[3])
+    intersection = max(0, right - left) * max(0, bottom - top)
+    if not intersection:
+        return False
+    smaller_area = min(_box_area(first), _box_area(second))
+    union = _box_area(first) + _box_area(second) - intersection
+    return smaller_area > 0 and (intersection / smaller_area >= 0.5 or intersection / union >= 0.25)
+
+
+def _dedupe_boxes(raw_boxes) -> list[tuple[int, int, int, int]]:
+    boxes: list[tuple[int, int, int, int]] = []
+    for raw_box in raw_boxes:
+        box = tuple(int(value) for value in raw_box[:4])
+        if box[2] <= 0 or box[3] <= 0:
+            continue
+        if any(_boxes_overlap(box, existing) for existing in boxes):
+            continue
+        boxes.append(box)
+    return boxes
+
+
 def _validate_source(image: Image.Image) -> None:
     if image.format not in {"JPEG", "PNG", "MPO"}:
         raise _error("unsupported_image", "图片格式不支持设备专用导出。")
@@ -106,14 +136,19 @@ def _detect_face(image: Image.Image) -> tuple[int, int, int, int, float, float, 
         _DETECTION_SLOT.release()
     if time.perf_counter() - started > DEVICE_DETECTION_BUDGET_SECONDS:
         raise _error("detection_timeout", "设备专用人脸检测超过软时间预算，未导出该照片。")
-    if len(faces) == 0 and len(profile_faces) > 0:
+    frontal_boxes = _dedupe_boxes(faces)
+    profile_boxes = _dedupe_boxes(profile_faces)
+    if not frontal_boxes and profile_boxes:
         raise _error("profile_face", "检测到明显侧脸，不能生成设备专用照片。")
-    if len(faces) == 0:
+    if not frontal_boxes:
         raise _error("no_face", "未检测到清晰正脸，不能生成设备专用照片。")
-    if len(faces) > 1:
+    if len(frontal_boxes) > 1 or any(
+        not any(_boxes_overlap(profile_box, frontal_box) for frontal_box in frontal_boxes)
+        for profile_box in profile_boxes
+    ):
         raise _error("multiple_faces", "检测到多张人脸，不能自动选择其中一张。")
 
-    x, y, detected_width, detected_height = [int(value) for value in faces[0]]
+    x, y, detected_width, detected_height = frontal_boxes[0]
     scale_x = source_width / detection_width
     scale_y = source_height / detection_height
     x = round(x * scale_x)
@@ -157,20 +192,28 @@ def _crop_head_shoulders(image: Image.Image, x: int, y: int, face_width: int, fa
     return cropped, ratio
 
 
-def _save_jpeg_under_limit(cropped: Image.Image, face_width: int, face_height: int, output_dir: Path) -> tuple[Path, DevicePhotoMetrics]:
+def _save_jpeg_under_limit(
+    image_to_save: Image.Image,
+    face_width: int,
+    face_height: int,
+    output_dir: Path,
+    *,
+    source_size: tuple[int, int] | None = None,
+) -> tuple[Path, DevicePhotoMetrics]:
     output_dir.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="device-photo-", suffix=".jpg", dir=output_dir)
     os.close(fd)
     path = Path(name)
+    source_width, source_height = source_size or image_to_save.size
     try:
         for scale in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5):
-            width = max(1, round(cropped.width * scale))
-            height = max(1, round(cropped.height * scale))
+            width = max(1, round(image_to_save.width * scale))
+            height = max(1, round(image_to_save.height * scale))
             scaled_face_width = round(face_width * scale)
             scaled_face_height = round(face_height * scale)
             if scaled_face_width < DEVICE_FACE_MIN_PIXELS or scaled_face_height < DEVICE_FACE_MIN_PIXELS:
                 break
-            image = cropped if scale == 1.0 else cropped.resize((width, height), Image.Resampling.LANCZOS)
+            image = image_to_save if scale == 1.0 else image_to_save.resize((width, height), Image.Resampling.LANCZOS)
             for quality in DEVICE_JPEG_QUALITIES:
                 image.save(path, format="JPEG", quality=quality, optimize=False, progressive=False, subsampling=0)
                 size = path.stat().st_size
@@ -181,10 +224,29 @@ def _save_jpeg_under_limit(cropped: Image.Image, face_width: int, face_height: i
                     if scaled_face_height / height < DEVICE_FACE_HEIGHT_RATIO:
                         raise _error("face_height_ratio", "压缩后人脸纵向占比不足 1/3。")
                     return path, DevicePhotoMetrics(
-                        cropped.width, cropped.height, scaled_face_width, scaled_face_height,
+                        source_width, source_height, scaled_face_width, scaled_face_height,
                         width, height, size, quality,
                     )
         raise _error("compression_target_unmet", "在保持合理清晰度和最低人脸尺寸的情况下，无法达到 500KB 试行目标。")
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _copy_original_jpeg(source_path: Path, output_dir: Path, image_size: tuple[int, int], face_size: tuple[int, int]) -> tuple[Path, DevicePhotoMetrics]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="device-photo-", suffix=".jpg", dir=output_dir)
+    os.close(fd)
+    path = Path(name)
+    try:
+        shutil.copyfile(source_path, path)
+        with Image.open(path) as check:
+            if check.format != "JPEG" or check.size != image_size or check.mode != "RGB":
+                raise _error("jpeg_validation", "设备专用 JPEG 直通校验失败。")
+        return path, DevicePhotoMetrics(
+            image_size[0], image_size[1], face_size[0], face_size[1],
+            image_size[0], image_size[1], path.stat().st_size, 0,
+        )
     except Exception:
         path.unlink(missing_ok=True)
         raise
@@ -196,6 +258,9 @@ def prepare_device_photo(source_path: str | Path, output_dir: str | Path) -> tup
     try:
         with Image.open(source_path) as source:
             _validate_source(source)
+            source_format = source.format
+            source_mode = source.mode
+            source_orientation = source.getexif().get(274)
             image = ImageOps.exif_transpose(source).convert("RGB")
             image.load()
     except DevicePhotoError:
@@ -204,8 +269,23 @@ def prepare_device_photo(source_path: str | Path, output_dir: str | Path) -> tup
         raise _error("invalid_image", f"图片损坏或无法读取：{exc}") from exc
     try:
         x, y, face_width, face_height, *_ = _detect_face(image)
+        image_size = image.size
+        face_ratio = face_height / max(1, image.height)
+        if face_ratio >= DEVICE_FACE_HEIGHT_RATIO:
+            if (
+                source_format == "JPEG"
+                and source_mode == "RGB"
+                and source_orientation in (None, 1)
+                and source_path.stat().st_size <= DEVICE_MAX_BYTES
+            ):
+                return _copy_original_jpeg(source_path, Path(output_dir), image_size, (face_width, face_height))
+            return _save_jpeg_under_limit(
+                image, face_width, face_height, Path(output_dir), source_size=image_size,
+            )
         cropped, _ = _crop_head_shoulders(image, x, y, face_width, face_height)
-        return _save_jpeg_under_limit(cropped, face_width, face_height, Path(output_dir))
+        return _save_jpeg_under_limit(
+            cropped, face_width, face_height, Path(output_dir), source_size=image_size,
+        )
     except DevicePhotoError:
         raise
     except Exception as exc:

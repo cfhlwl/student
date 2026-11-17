@@ -44,12 +44,12 @@ def fake_models(monkeypatch, *, faces=dynamic_face, profiles=(), eyes=lambda ima
     )
 
 
-def noisy_jpeg(size=(1600, 2200), *, orientation=None):
+def noisy_jpeg(size=(1600, 2200), *, orientation=None, quality=96):
     rng = np.random.default_rng(7)
     pixels = rng.integers(40, 216, (size[1], size[0], 3), dtype=np.uint8)
     image = Image.fromarray(pixels, "RGB")
     out = io.BytesIO()
-    kwargs = {"format": "JPEG", "quality": 96, "subsampling": 0}
+    kwargs = {"format": "JPEG", "quality": quality, "subsampling": 0}
     if orientation is not None:
         exif = image.getexif()
         exif[274] = orientation
@@ -104,6 +104,53 @@ def test_device_photo_exif_crop_and_compression(monkeypatch, tmp_path):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
+    ("size", "quality"),
+    [((320, 240), 50), ((400, 300), 60)],
+)
+def test_qualified_small_jpegs_are_copied_without_reencoding(monkeypatch, tmp_path, size, quality):
+    fake_models(monkeypatch, faces=lambda image: [(50, 10, 150, 150)])
+    source = tmp_path / f"small-{quality}.jpg"
+    source_bytes = noisy_jpeg(size=size, quality=quality)
+    assert len(source_bytes) <= (50 if quality == 50 else 200) * 1024
+    source.write_bytes(source_bytes)
+
+    output, metrics = prepare_device_photo(source, tmp_path / "out")
+
+    assert output.read_bytes() == source_bytes
+    assert metrics.output_size == len(source_bytes)
+    assert metrics.jpeg_quality == 0
+
+
+@pytest.mark.django_db
+def test_qualified_large_jpeg_is_scaled_without_cropping(monkeypatch, tmp_path):
+    fake_models(monkeypatch, faces=lambda image: [(500, 10, 500, 900)])
+    source = tmp_path / "large-full-frame.jpg"
+    source.write_bytes(noisy_jpeg(size=(1250, 1850)))
+    assert source.stat().st_size > 5 * 1024 * 1024
+
+    output, _ = prepare_device_photo(source, tmp_path / "out")
+
+    with Image.open(source) as original, Image.open(output) as converted:
+        assert output.stat().st_size <= 500 * 1024
+        assert converted.size[0] / converted.size[1] == pytest.approx(original.size[0] / original.size[1], rel=0.02)
+
+
+@pytest.mark.django_db
+def test_large_upper_body_photo_is_cropped_only_when_face_ratio_is_small(monkeypatch, tmp_path):
+    fake_models(monkeypatch, faces=lambda image: [(550, 500, 400, 400)])
+    source = tmp_path / "upper-body.jpg"
+    source.write_bytes(noisy_jpeg(size=(1600, 2200)))
+    assert source.stat().st_size > 8_000_000
+
+    output, _ = prepare_device_photo(source, tmp_path / "out")
+
+    with Image.open(source) as original, Image.open(output) as converted:
+        assert output.stat().st_size <= 500 * 1024
+        assert converted.size[0] / converted.size[1] != pytest.approx(original.size[0] / original.size[1], rel=0.02)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
     ("faces", "profiles", "code"),
     [([], [], "no_face"), ([(1, 1, 100, 100), (200, 1, 100, 100)], [], "multiple_faces"), ([], [(1, 1, 100, 100)], "profile_face"), ([(1, 1, 20, 20)], [], "face_too_small")],
 )
@@ -114,6 +161,35 @@ def test_device_photo_rejects_unsafe_face_cases(monkeypatch, tmp_path, faces, pr
     with pytest.raises(DevicePhotoError) as exc_info:
         prepare_device_photo(source, tmp_path / "out")
     assert exc_info.value.code == code
+
+
+@pytest.mark.django_db
+def test_mixed_frontal_and_distinct_profile_faces_are_rejected(monkeypatch, tmp_path):
+    fake_models(
+        monkeypatch,
+        faces=[(200, 200, 400, 500)],
+        profiles=[(1100, 250, 300, 420)],
+    )
+    source = tmp_path / "mixed-faces.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    with pytest.raises(DevicePhotoError) as exc_info:
+        prepare_device_photo(source, tmp_path / "out")
+    assert exc_info.value.code == "multiple_faces"
+
+
+@pytest.mark.django_db
+def test_overlapping_profile_box_is_deduplicated(monkeypatch, tmp_path):
+    fake_models(
+        monkeypatch,
+        faces=[(200, 200, 400, 500)],
+        profiles=[(220, 210, 380, 480)],
+    )
+    source = tmp_path / "same-face-detectors.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    output, _ = prepare_device_photo(source, tmp_path / "out")
+    assert output.is_file()
 
 
 @pytest.mark.django_db
