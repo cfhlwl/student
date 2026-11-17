@@ -9,6 +9,10 @@
     <p>已生成 <strong id="export-count">0</strong> 名学生的资料。</p>
     <a id="export-download" class="button primary" href="#">下载 ZIP →</a>
   </div>
+  <div id="export-stale" hidden>
+    <p>学生资料已更新，请重新导出。</p>
+    <a class="button primary" href="{% url 'admin-students' %}">重新导出 →</a>
+  </div>
   <div id="export-error" class="error-message" hidden></div>
   <p><a class="text-link" href="{% url 'admin-students' %}">返回学生资料与导出</a></p>
 </section>
@@ -35,6 +39,11 @@
       if (data.status === 'failed') {
         error.textContent = data.error || '导出失败，请稍后重试。';
         error.hidden = false;
+        return;
+      }
+      if (data.status === 'stale') {
+        text.textContent = '学生资料已更新，请重新导出。';
+        document.getElementById('export-stale').hidden = false;
         return;
       }
       window.setTimeout(poll, 2000);

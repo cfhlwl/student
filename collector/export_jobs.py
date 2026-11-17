@@ -59,6 +59,16 @@ def build_export_snapshot(filters):
     submission_ids = {student.submission_id for student in students}
     submissions = Submission.objects.filter(id__in=submission_ids).order_by("id")
     documents = SubmissionDocument.objects.filter(submission_id__in=submission_ids).order_by("id")
+
+    def stored_size(field):
+        try:
+            return field.size
+        except (FileNotFoundError, OSError, ValueError):
+            # The export service deliberately handles missing managed files as
+            # archive anomalies. Snapshotting must not turn that compatibility
+            # path into a synchronous enqueue failure.
+            return None
+
     payload = {
         "students": [
             {
@@ -90,7 +100,7 @@ def build_export_snapshot(filters):
                 "id": str(row.id),
                 "source_filename": row.source_filename,
                 "roster_file": row.roster_file.name if row.roster_file else "",
-                "roster_size": row.roster_file.size if row.roster_file else 0,
+                "roster_size": stored_size(row.roster_file) if row.roster_file else 0,
             }
             for row in submissions
         ],
