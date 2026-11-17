@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import secrets
 from datetime import timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ EXPORT_FILE_NAME = "学生资料导出.zip"
 # 0600 archive cannot be read by nginx. Keep the URL protected by nginx's
 # `internal` location, but make the completed file readable by its consumer.
 EXPORT_FILE_MODE = 0o644
+DELETE_QUARANTINE_RE = re.compile(r"^\.student-delete-(?P<job_id>[1-9][0-9]*)-(?P<token>[0-9a-f]{24})\.zip$")
 
 
 class ExportQueueFull(Exception):
@@ -297,6 +299,86 @@ def process_export_job(job):
         )
 
 
+def _safe_delete_quarantine_paths(export_dir):
+    """Recover or finish quarantined deletes after a web-process crash.
+
+    The caller must hold collection_write_gate(). Quarantine files are only
+    considered when they are direct, non-symlink children of EXPORT_TEMP_DIR.
+    Recovery uses an exclusive hard-link creation so an existing ZIP can never
+    be overwritten. A second cleanup pass completes a recovery interrupted
+    after the link was created but before the quarantine entry was removed.
+    """
+    if not export_dir.is_dir() or export_dir.is_symlink():
+        return
+    export_root = export_dir.resolve()
+    quarantines = {}
+    for candidate in export_dir.glob(".student-delete-*.zip"):
+        try:
+            match = DELETE_QUARANTINE_RE.fullmatch(candidate.name)
+            if not match or candidate.is_symlink() or not candidate.is_file():
+                continue
+            if candidate.parent.is_symlink() or candidate.parent.resolve() != export_root:
+                continue
+            quarantines.setdefault(int(match.group("job_id")), []).append(candidate)
+        except OSError:
+            continue
+    if not quarantines:
+        return
+
+    jobs = {
+        job.pk: job
+        for job in ExportJob.objects.filter(pk__in=quarantines).only("pk", "file_path")
+    }
+    for job_id, paths in quarantines.items():
+        job = jobs.get(job_id)
+        if job is None:
+            # The transaction committed and removed the task. The quarantine
+            # is now an orphan, but still remove only the exact safe names we
+            # discovered above.
+            for quarantine in paths:
+                try:
+                    if not quarantine.is_symlink() and quarantine.is_file():
+                        quarantine.unlink(missing_ok=True)
+                except OSError:
+                    continue
+            continue
+
+        try:
+            source = Path(job.file_path)
+            if not job.file_path or source.is_symlink() or source.parent.is_symlink():
+                continue
+            if source.resolve().parent != export_root:
+                continue
+            if source.exists():
+                # The source was already restored before a previous crash;
+                # remove only the redundant quarantine entries.
+                for quarantine in paths:
+                    try:
+                        if not quarantine.is_symlink() and quarantine.is_file():
+                            quarantine.unlink(missing_ok=True)
+                    except OSError:
+                        continue
+                continue
+            if len(paths) != 1:
+                # Ambiguous state is retained for manual review rather than
+                # guessing which ZIP belongs to the task.
+                continue
+            quarantine = paths[0]
+            if quarantine.is_symlink() or not quarantine.is_file():
+                continue
+            # os.link fails if source appeared meanwhile; unlike os.replace it
+            # cannot overwrite an existing ZIP or follow a destination link.
+            os.link(quarantine, source)
+            try:
+                quarantine.unlink(missing_ok=True)
+            except OSError:
+                # The source is already safely restored. A later idempotent
+                # cleanup pass will remove this redundant directory entry.
+                continue
+        except (OSError, ValueError):
+            continue
+
+
 def cleanup_export_jobs():
     """Requeue only stale leases and delete only their own immutable files."""
     try:
@@ -312,6 +394,7 @@ def cleanup_export_jobs():
             export_dir = Path(settings.EXPORT_TEMP_DIR)
             if not export_dir.is_dir():
                 return
+            _safe_delete_quarantine_paths(export_dir)
             orphan_before = now.timestamp() - max(3600, settings.EXPORT_JOB_TIMEOUT_SECONDS)
             handoff_before = now.timestamp() - max(60, settings.EXPORT_DOWNLOAD_HANDOFF_GRACE_SECONDS)
             for path in export_dir.glob(".student-download-handoff-*.zip"):

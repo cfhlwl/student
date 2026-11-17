@@ -440,6 +440,70 @@ def test_delete_file_failure_restores_job_and_zip(client, settings, tmp_path, mo
 
 
 @pytest.mark.django_db
+def test_delete_quarantine_recovers_after_precommit_interrupt(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'a' * 24}.zip")
+    os.replace(archive, quarantine)
+
+    # This is the state left by a process dying after os.replace and before
+    # the transaction can commit: the DB row remains, but its source path is
+    # absent. The worker must restore the original entry without overwriting.
+    cleanup_export_jobs()
+    job.refresh_from_db()
+    assert job.status == "completed"
+    assert archive.read_bytes() == b"retained archive"
+    assert not quarantine.exists()
+
+    # A second worker pass is a no-op and remains safe.
+    cleanup_export_jobs()
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
+def test_delete_quarantine_cleans_after_postcommit_interrupt(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'b' * 24}.zip")
+    os.replace(archive, quarantine)
+    job.delete()
+
+    # This is the state left by a process dying after the DB commit and before
+    # the physical unlink. The task is gone, so only the exact orphan
+    # quarantine entry may be removed.
+    cleanup_export_jobs()
+    assert not quarantine.exists()
+    assert not archive.exists()
+    assert not ExportJob.objects.filter(pk=job.pk).exists()
+
+
+@pytest.mark.django_db
+def test_delete_quarantine_never_overwrites_existing_zip(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'c' * 24}.zip")
+    quarantine.write_bytes(b"stale quarantine")
+
+    cleanup_export_jobs()
+    assert archive.read_bytes() == b"retained archive"
+    assert not quarantine.exists()
+
+
+@pytest.mark.django_db
+def test_delete_quarantine_does_not_follow_symlink(settings, tmp_path):
+    job, archive = _completed_delete_fixture(settings, tmp_path)
+    outside = tmp_path / "outside.zip"
+    outside.write_bytes(b"outside archive")
+    quarantine = archive.with_name(f".student-delete-{job.pk}-{'d' * 24}.zip")
+    try:
+        os.symlink(outside, quarantine)
+    except (OSError, NotImplementedError):
+        return
+
+    cleanup_export_jobs()
+    assert quarantine.is_symlink()
+    assert outside.read_bytes() == b"outside archive"
+    assert archive.read_bytes() == b"retained archive"
+
+
+@pytest.mark.django_db
 def test_accel_handoff_survives_delete_until_cleanup(client, settings, tmp_path):
     job, archive = _completed_delete_fixture(settings, tmp_path)
     settings.EXPORT_DOWNLOAD_HANDOFF_GRACE_SECONDS = 60
