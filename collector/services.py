@@ -1477,6 +1477,23 @@ def _stage_export_file(file_field, *, expected_size=None, expected_sha256=""):
         raise ExportFileError(str(exc)) from exc
 
 
+def _source_is_readable_image(path):
+    """Distinguish a usable original from a failed device conversion.
+
+    The staging step already verified the source size and SHA256.  This second,
+    decode-only check is only needed after device preprocessing fails so that a
+    corrupt source is not presented as a safe fallback original.
+    """
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+        return True
+    except Exception:
+        return False
+
+
 def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_callback=None, export_metrics=None):
     export_mode = filters.get("export_mode", EXPORT_MODE_ORIGINAL)
     if export_mode not in {EXPORT_MODE_ORIGINAL, EXPORT_MODE_FACE_DEVICE}:
@@ -1610,7 +1627,11 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
                                 metrics["rejection_reasons"]["source_unavailable"] += 1
                                 photo_anomalies.append(("文件缺失", student.name, f"照片无法读取：{photo.file.name}；{exc}"))
                             except DevicePhotoError as exc:
-                                if device_mode and staged_photo is not None and exc.code not in {"invalid_image", "unsupported_image", "invalid_dimensions", "jpeg_validation"}:
+                                # A staged source has already passed the size/SHA256 check.  If it
+                                # also decodes successfully, every device-side failure (including
+                                # JPEG validation and unsupported-device conversion) must retain the
+                                # original instead of silently dropping the student photo.
+                                if device_mode and staged_photo is not None and _source_is_readable_image(staged_photo):
                                     fallback_name = render_filename(student, rule, used)
                                     archive.write(staged_photo, f"{category_dir}/待处理原图/{fallback_name}")
                                     student._export_name = fallback_name

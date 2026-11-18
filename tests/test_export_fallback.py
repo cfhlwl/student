@@ -8,6 +8,7 @@ from django.core.files.base import ContentFile
 from django.contrib.auth.models import User
 from django.urls import reverse
 from openpyxl import load_workbook
+from PIL import Image
 
 from collector import services
 from collector.export_jobs import claim_next_export_job, enqueue_export_job, process_export_job
@@ -15,6 +16,17 @@ from collector.face_export import DevicePhotoError
 from collector.maintenance import write_state
 from collector.models import ClassGroup, ExportJob, SchoolYear, Student, StudentPhoto, Submission
 from collector.services import export_students_to_tempfile
+
+
+def _image_bytes(format_name="JPEG"):
+    image = Image.new("RGB", (640, 480), (96, 128, 160))
+    out = io.BytesIO()
+    if format_name == "MPO":
+        second = Image.new("RGB", image.size, (160, 128, 96))
+        image.save(out, format="MPO", save_all=True, append_images=[second])
+    else:
+        image.save(out, format=format_name)
+    return out.getvalue()
 
 
 def _approved_group():
@@ -64,8 +76,8 @@ def test_face_device_failed_preprocess_keeps_verified_original_and_accounts_outp
     settings.MEDIA_ROOT = tmp_path / "media"
     settings.EXPORT_TEMP_DIR = tmp_path / "exports"
     year, submission = _approved_group()
-    fallback_bytes = b"verified-original-png-bytes"
-    ready_bytes = b"verified-original-jpeg-bytes"
+    fallback_bytes = _image_bytes("PNG")
+    ready_bytes = _image_bytes("JPEG")
     fallback_student = _student(submission, year, "回退照片", 1)
     ready_student = _student(submission, year, "设备照片", 2)
     _photo(fallback_student, fallback_bytes, "回退照片.png")
@@ -107,6 +119,39 @@ def test_face_device_failed_preprocess_keeps_verified_original_and_accounts_outp
         "source_unavailable_count": 0,
         "rejection_reasons": {"multiple_faces": 1},
     }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("format_name", "extension", "error_code"),
+    [("JPEG", ".jpg", "jpeg_validation"), ("PNG", ".png", "unsupported_image"), ("MPO", ".mpo", "device_photo_error")],
+)
+def test_readable_source_falls_back_for_device_output_failures(monkeypatch, settings, tmp_path, format_name, extension, error_code):
+    settings.MEDIA_ROOT = tmp_path / "media"
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    year, submission = _approved_group()
+    source_bytes = _image_bytes(format_name)
+    student = _student(submission, year, f"兜底{format_name}", 1)
+    _photo(student, source_bytes, f"兜底{format_name}{extension}")
+
+    def fail_device_conversion(source_path, output_dir):
+        raise DevicePhotoError(error_code, "合成设备处理失败")
+
+    monkeypatch.setattr(services, "prepare_device_photo", fail_device_conversion)
+    metrics = {}
+    path, _, _ = export_students_to_tempfile({"export_mode": "face_device"}, export_metrics=metrics)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            assert archive.testzip() is None
+            members = [name for name in archive.namelist() if "/待处理原图/" in name]
+            assert len(members) == 1
+            assert members[0].endswith(extension)
+            assert archive.read(members[0]) == source_bytes
+    finally:
+        path.unlink(missing_ok=True)
+    assert metrics["fallback_original_count"] == 1
+    assert metrics["source_unavailable_count"] == 0
+    assert metrics["rejection_reasons"] == {error_code: 1}
 
 
 @pytest.mark.django_db
@@ -163,7 +208,7 @@ def test_export_job_persists_photo_accounting_and_status_api(monkeypatch, client
     write_state("open")
     year, submission = _approved_group()
     student = _student(submission, year, "任务统计", 1)
-    _photo(student, b"verified-source", "任务统计.jpg")
+    _photo(student, _image_bytes("JPEG"), "任务统计.jpg")
 
     def reject(source_path, output_dir):
         raise DevicePhotoError("face_too_small", "人脸区域过小。")
@@ -184,6 +229,30 @@ def test_export_job_persists_photo_accounting_and_status_api(monkeypatch, client
     assert response.status_code == 200
     assert response.json()["photo_accounting_known"] is True
     assert response.json()["fallback_original_count"] == 1
+
+
+@pytest.mark.django_db
+def test_export_download_list_reports_photo_accounting(client):
+    job = ExportJob.objects.create(
+        fingerprint="l" * 64,
+        data_snapshot="s" * 64,
+        status="completed",
+        student_count=4,
+        exported_photo_count=2,
+        fallback_original_count=1,
+        source_unavailable_count=1,
+        filters={"export_mode": "face_device"},
+    )
+    admin = User.objects.create_user(username="export-list-admin", password="strong-password-123", is_staff=True)
+    client.force_login(admin)
+    response = client.get(reverse("admin-exports"))
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert "已处理 4 人" in body
+    assert "实际输出照片 3 张" in body
+    assert "设备合格 JPG 2 张" in body
+    assert "待处理原图 1 张" in body
+    assert "源文件不可用 1 张" in body
 
 
 @pytest.mark.django_db
