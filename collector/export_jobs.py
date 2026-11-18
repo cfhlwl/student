@@ -3,6 +3,7 @@ import json
 import os
 import re
 import secrets
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -32,6 +33,28 @@ class ExportQueueFull(Exception):
 
 class ExportLeaseLost(Exception):
     pass
+
+
+class _ThrottledExportProgress:
+    """Keep the in-memory count exact while reducing SQLite progress writes."""
+
+    def __init__(self, job, token):
+        self.job = job
+        self.token = token
+        self.last_count = -1
+        self.last_write = 0.0
+
+    def __call__(self, processed_count, total_count):
+        now = time.monotonic()
+        if (
+            processed_count == 0
+            or processed_count >= total_count
+            or processed_count - self.last_count >= settings.EXPORT_PROGRESS_UPDATE_MIN_STEP
+            or now - self.last_write >= settings.EXPORT_PROGRESS_UPDATE_MIN_INTERVAL_SECONDS
+        ):
+            _update_export_progress(self.job, self.token, processed_count, total_count)
+            self.last_count = processed_count
+            self.last_write = now
 
 
 def _export_options():
@@ -256,7 +279,7 @@ def process_export_job(job):
             job.filters,
             actor=job.requested_by,
             ip_address=job.requested_ip,
-            progress_callback=lambda processed, total: _update_export_progress(job, token, processed, total),
+            progress_callback=_ThrottledExportProgress(job, token),
         )
         with collection_write_gate():
             current = ExportJob.objects.filter(
@@ -281,6 +304,8 @@ def process_export_job(job):
                 status="completed",
                 file_path=str(final_path),
                 student_count=count,
+                total_count=count,
+                processed_count=count,
                 preview=preview,
                 completed_at=timezone.now(),
                 expires_at=None,
