@@ -7,12 +7,14 @@ The original uploaded file is never modified.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from math import hypot
 from pathlib import Path
 
@@ -33,6 +35,17 @@ from .photo_quality import (
 
 
 DEVICE_EXPORT_PROFILE_VERSION = "face-device-v1"
+DEVICE_EXPORT_YUNET_PROFILE_VERSION = "face-device-yunet-v1"
+DEVICE_FACE_DETECTOR_HAAR = "haar"
+DEVICE_FACE_DETECTOR_YUNET = "yunet"
+YUNET_MODEL_VERSION = "face_detection_yunet_2023mar"
+YUNET_MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+YUNET_MODEL_DEFAULT_PATH = Path(__file__).resolve().parents[1] / "models" / "face_detection_yunet" / "face_detection_yunet_2023mar.onnx"
+YUNET_INPUT_SIZE = (320, 320)
+YUNET_MAX_DETECTION_DIMENSION = 960
+YUNET_SCORE_THRESHOLD = 0.70
+YUNET_NMS_THRESHOLD = 0.30
+YUNET_TOP_K = 5000
 DEVICE_MAX_BYTES = 500 * 1024
 DEVICE_MIN_JPEG_QUALITY = 70
 DEVICE_JPEG_QUALITIES = (92, 88, 84, 80, 76, 72, DEVICE_MIN_JPEG_QUALITY)
@@ -63,8 +76,87 @@ class DevicePhotoMetrics:
     jpeg_quality: int
 
 
+@dataclass(frozen=True)
+class YuNetDetection:
+    box: tuple[int, int, int, int]
+    landmarks: tuple[tuple[float, float], ...]
+    score: float
+
+
 def _error(code: str, message: str) -> DevicePhotoError:
     return DevicePhotoError(code, message)
+
+
+def configured_face_detector() -> str:
+    """Return the explicitly selected device detector.
+
+    Haar remains the compatibility default. YuNet is opt-in until its isolated
+    evaluation is complete; a missing or invalid configuration is reported as
+    an error rather than silently changing detector families.
+    """
+    detector = os.getenv("FACE_DEVICE_DETECTOR", DEVICE_FACE_DETECTOR_HAAR).strip().lower()
+    if detector not in {DEVICE_FACE_DETECTOR_HAAR, DEVICE_FACE_DETECTOR_YUNET}:
+        raise DevicePhotoError("detector_config_invalid", f"设备人脸检测器配置无效：{detector or '空值'}。")
+    return detector
+
+
+def device_export_profile() -> dict[str, object]:
+    """Return detector/model identity used by export fingerprints and reports."""
+    detector = configured_face_detector()
+    profile: dict[str, object] = {
+        "detector": detector,
+        "version": DEVICE_EXPORT_PROFILE_VERSION,
+        "max_bytes": DEVICE_MAX_BYTES,
+        "min_face_pixels": DEVICE_FACE_MIN_PIXELS,
+        "min_face_height_ratio": DEVICE_FACE_HEIGHT_RATIO,
+    }
+    if detector == DEVICE_FACE_DETECTOR_YUNET:
+        profile.update({
+            "version": DEVICE_EXPORT_YUNET_PROFILE_VERSION,
+            "model": YUNET_MODEL_VERSION,
+            "model_sha256": os.getenv("FACE_YUNET_MODEL_SHA256", YUNET_MODEL_SHA256).lower(),
+            "score_threshold": float(os.getenv("FACE_YUNET_SCORE_THRESHOLD", str(YUNET_SCORE_THRESHOLD))),
+            "nms_threshold": float(os.getenv("FACE_YUNET_NMS_THRESHOLD", str(YUNET_NMS_THRESHOLD))),
+        })
+    return profile
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=2)
+def _load_yunet_detector(model_path: str, expected_sha256: str, score_threshold: float, nms_threshold: float):
+    path = Path(model_path)
+    if not path.is_file() or path.is_symlink():
+        raise PhotoQualityModelUnavailable(f"YuNet 模型文件缺失：{path.name}")
+    try:
+        actual_sha256 = _sha256_file(path)
+    except OSError as exc:
+        raise PhotoQualityModelUnavailable(f"YuNet 模型文件无法读取：{exc}") from exc
+    if actual_sha256.lower() != expected_sha256.lower():
+        raise PhotoQualityModelUnavailable(
+            f"YuNet 模型 SHA256 不匹配：期望 {expected_sha256}，实际 {actual_sha256}"
+        )
+    try:
+        import cv2
+        try:
+            cv2.setNumThreads(1)
+        except AttributeError:
+            pass
+        detector = cv2.FaceDetectorYN.create(
+            str(path), "", YUNET_INPUT_SIZE,
+            float(score_threshold), float(nms_threshold), YUNET_TOP_K,
+        )
+        if detector is None:
+            raise RuntimeError("FaceDetectorYN.create 返回空检测器")
+    except Exception as exc:
+        raise PhotoQualityModelUnavailable(f"YuNet 模型加载失败：{exc}") from exc
+    return cv2, detector
 
 
 def _box_area(box: tuple[int, int, int, int]) -> int:
@@ -119,7 +211,7 @@ def _validate_source(image: Image.Image) -> None:
         raise _error("image_memory_budget", "图片解码内存超过设备导出预算。")
 
 
-def _detect_face(image: Image.Image) -> tuple[int, int, int, int, float, float, float, float, float]:
+def _detect_face_haar(image: Image.Image) -> tuple[int, int, int, int, float, float, float, float, float]:
     source_width, source_height = image.size
     scale = min(1.0, MAX_DETECTION_DIMENSION / max(source_width, source_height))
     detection_width = max(1, round(source_width * scale))
@@ -185,6 +277,121 @@ def _detect_face(image: Image.Image) -> tuple[int, int, int, int, float, float, 
     if brightness > MAX_BRIGHTNESS or clipped_ratio > MAX_CLIPPED_RATIO and brightness >= 128:
         raise _error("overexposed", "图像偏亮或存在明显过曝。")
     return x, y, face_width, face_height, source_width, source_height, sharpness, brightness, clipped_ratio
+
+
+def _same_yunet_detection(first: YuNetDetection, second: YuNetDetection) -> bool:
+    if not _same_face_detection(first.box, second.box):
+        return False
+    first_nose = first.landmarks[2]
+    second_nose = second.landmarks[2]
+    width = min(first.box[2], second.box[2])
+    height = min(first.box[3], second.box[3])
+    return hypot(first_nose[0] - second_nose[0], first_nose[1] - second_nose[1]) <= 0.20 * min(width, height)
+
+
+def _dedupe_yunet_detections(detections: list[YuNetDetection]) -> list[YuNetDetection]:
+    unique: list[YuNetDetection] = []
+    for detection in sorted(detections, key=lambda item: (-item.score, item.box, item.landmarks)):
+        if any(_same_yunet_detection(detection, existing) for existing in unique):
+            continue
+        unique.append(detection)
+    return unique
+
+
+def _landmarks_are_frontal(detection: YuNetDetection) -> bool:
+    left_eye, right_eye, nose, left_mouth, right_mouth = detection.landmarks
+    _, _, width, height = detection.box
+    eye_distance = hypot(left_eye[0] - right_eye[0], left_eye[1] - right_eye[1])
+    eye_mid_x = (left_eye[0] + right_eye[0]) / 2
+    mouth_mid_x = (left_mouth[0] + right_mouth[0]) / 2
+    if eye_distance < width * 0.12:
+        return False
+    if abs(left_eye[1] - right_eye[1]) > height * 0.35:
+        return False
+    if abs(nose[0] - eye_mid_x) > width * 0.25:
+        return False
+    if abs(mouth_mid_x - eye_mid_x) > width * 0.30:
+        return False
+    if not (min(left_eye[1], right_eye[1]) <= nose[1] <= max(left_mouth[1], right_mouth[1])):
+        return False
+    return True
+
+
+def _detect_face_yunet(image: Image.Image) -> tuple[int, int, int, int, float, float, float, float, float]:
+    source_width, source_height = image.size
+    scale = min(1.0, YUNET_MAX_DETECTION_DIMENSION / max(source_width, source_height))
+    detection_width = max(1, round(source_width * scale))
+    detection_height = max(1, round(source_height * scale))
+    started = time.perf_counter()
+    expected_sha256 = os.getenv("FACE_YUNET_MODEL_SHA256", YUNET_MODEL_SHA256)
+    model_path = os.getenv("FACE_YUNET_MODEL_PATH", str(YUNET_MODEL_DEFAULT_PATH))
+    score_threshold = float(os.getenv("FACE_YUNET_SCORE_THRESHOLD", str(YUNET_SCORE_THRESHOLD)))
+    nms_threshold = float(os.getenv("FACE_YUNET_NMS_THRESHOLD", str(YUNET_NMS_THRESHOLD)))
+    try:
+        import cv2
+        rgb = np.asarray(image.convert("RGB"))
+        if scale != 1.0:
+            rgb = np.asarray(image.resize((detection_width, detection_height), Image.Resampling.LANCZOS).convert("RGB"))
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        cv2_module, detector = _load_yunet_detector(model_path, expected_sha256, score_threshold, nms_threshold)
+        detector.setInputSize((detection_width, detection_height))
+        _, raw_detections = detector.detect(bgr)
+    except PhotoQualityModelUnavailable as exc:
+        raise _error("model_unavailable", str(exc)) from exc
+    except Exception as exc:
+        raise _error("detection_error", f"YuNet 图像检测失败：{exc}") from exc
+
+    if time.perf_counter() - started > DEVICE_DETECTION_BUDGET_SECONDS:
+        raise _error("detection_timeout", "YuNet 人脸检测超过软时间预算，未导出该照片。")
+    detections: list[YuNetDetection] = []
+    if raw_detections is not None:
+        for row in np.asarray(raw_detections):
+            if len(row) < 15 or float(row[14]) < score_threshold:
+                continue
+            box = tuple(int(round(float(value))) for value in row[:4])
+            if box[2] <= 0 or box[3] <= 0:
+                continue
+            landmarks = tuple(
+                (float(row[index]), float(row[index + 1]))
+                for index in (4, 6, 8, 10, 12)
+            )
+            detections.append(YuNetDetection(box=box, landmarks=landmarks, score=float(row[14])))
+    detections = _dedupe_yunet_detections(detections)
+    if not detections:
+        raise _error("no_face", "YuNet 未检测到清晰正脸，不能生成设备专用照片。")
+    if len(detections) > 1:
+        raise _error("multiple_faces", "YuNet 检测到多张人脸，不能自动选择其中一张。")
+    detection = detections[0]
+    if not _landmarks_are_frontal(detection):
+        raise _error("occluded_or_side_face", "YuNet 关键点显示面部存在遮挡或明显侧脸。")
+
+    x, y, detected_width, detected_height = detection.box
+    scale_x = source_width / detection_width
+    scale_y = source_height / detection_height
+    x = round(x * scale_x)
+    y = round(y * scale_y)
+    face_width = round(detected_width * scale_x)
+    face_height = round(detected_height * scale_y)
+    if face_width < DEVICE_FACE_MIN_PIXELS or face_height < DEVICE_FACE_MIN_PIXELS:
+        raise _error("face_too_small", f"人脸区域为 {face_width}×{face_height} 像素，小于 {DEVICE_FACE_MIN_PIXELS}×{DEVICE_FACE_MIN_PIXELS} 像素。")
+    brightness = float(gray.mean())
+    clipped_ratio = float(((gray <= 10) | (gray >= 245)).mean())
+    sharpness = float(cv2_module.Laplacian(gray, cv2_module.CV_64F).var())
+    if sharpness < MIN_SHARPNESS:
+        raise _error("blurry", f"图像清晰度不足（清晰度值 {sharpness:.1f}）。")
+    if brightness < MIN_BRIGHTNESS or clipped_ratio > MAX_CLIPPED_RATIO and brightness < 128:
+        raise _error("underexposed", "图像偏暗或存在明显欠曝。")
+    if brightness > MAX_BRIGHTNESS or clipped_ratio > MAX_CLIPPED_RATIO and brightness >= 128:
+        raise _error("overexposed", "图像偏亮或存在明显过曝。")
+    return x, y, face_width, face_height, source_width, source_height, sharpness, brightness, clipped_ratio
+
+
+def _detect_face(image: Image.Image) -> tuple[int, int, int, int, float, float, float, float, float]:
+    detector = configured_face_detector()
+    if detector == DEVICE_FACE_DETECTOR_YUNET:
+        return _detect_face_yunet(image)
+    return _detect_face_haar(image)
 
 
 def _crop_head_shoulders(image: Image.Image, x: int, y: int, face_width: int, face_height: int) -> tuple[Image.Image, float]:

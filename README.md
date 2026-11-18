@@ -16,6 +16,7 @@
 - 文件放在 Web 根目录之外，不提供公开媒体下载；导出不落公共静态目录；管理员操作写入审计记录。
 - Docker Compose + Gunicorn + Nginx；SQLite/私有媒体目录可独立备份。
 - 上传协调参数：单文件 20 MB、单批 32 MB、单批最多 20 张照片、Django 单请求最多 40 个文件、Nginx 40 MB、Gunicorn 300 秒；`MAX_STORAGE_MB` 控制私有媒体配额，导出临时 ZIP 使用 `EXPORT_TEMP_DIR`。
+- 设备专用导出默认使用兼容性 Haar 检测器（`FACE_DEVICE_DETECTOR=haar`）。YuNet 为显式隔离试用选项：设置 `FACE_DEVICE_DETECTOR=yunet` 后，应用只加载镜像内固定的 `face_detection_yunet_2023mar.onnx`，先核对 `FACE_YUNET_MODEL_SHA256`，模型缺失或校验失败会记录为模型不可用并保留原图兜底，不会静默回退到 Haar。设备导出指纹包含检测器、模型 SHA256 和质量参数；切换检测器不会复用旧 ZIP。
 
 ## 本地开发
 
