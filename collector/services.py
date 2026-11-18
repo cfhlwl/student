@@ -29,7 +29,7 @@ from PIL import Image, UnidentifiedImageError
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 from .face_export import DevicePhotoError, prepare_device_photo
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
-from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
+from .photo_quality import MAX_DECODE_MEMORY_BYTES, MAX_IMAGE_PIXELS, PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
 from .study_types import STUDY_TYPE_VALUES, normalize_study_type
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
@@ -1409,6 +1409,16 @@ def _write_workbook(students, label, anomalies, filename_preview=True):
         ("成功导出照片数", sum(bool(getattr(s, "_export_name", "")) for s in students)),
         ("缺失照片数", sum(not bool(getattr(s, "_export_name", "")) for s in students)),
     ]
+    if any(getattr(student, "_export_mode", "") == EXPORT_MODE_FACE_DEVICE for student in students):
+        device_ready = sum(getattr(student, "_export_status", "") == "设备合格" for student in students)
+        fallback_original = sum(getattr(student, "_export_status", "") == "待处理原图" for student in students)
+        source_unavailable = sum(not bool(getattr(student, "_export_name", "")) for student in students)
+        summary_rows.extend([
+            ("设备合格 JPG 数", device_ready),
+            ("待处理原图数", fallback_original),
+            ("源照片不可用数", source_unavailable),
+            ("设备处理拒绝数", fallback_original),
+        ])
     for row in summary_rows: summary.append([safe_excel_value(value) for value in row])
     detail = book.create_sheet("学生明细")
     detail.append(["姓名", "性别", "学部", "学年", "班级", "就读类型", "实际导出照片文件名", "匹配状态"])
@@ -1467,7 +1477,34 @@ def _stage_export_file(file_field, *, expected_size=None, expected_sha256=""):
         raise ExportFileError(str(exc)) from exc
 
 
-def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_callback=None):
+def _source_is_readable_image(path):
+    """Distinguish a usable original from a failed device conversion.
+
+    The staging step already verified the source size and SHA256.  This second,
+    decode-only check is only needed after device preprocessing fails so that a
+    corrupt source is not presented as a safe fallback original.
+    """
+    try:
+        with Image.open(path) as image:
+            image_format = image.format
+            width, height = image.size
+            if image_format not in ALLOWED_IMAGE_FORMATS or width <= 0 or height <= 0:
+                return False
+            image.verify()
+        # The source has already passed the complete staged size/SHA256 check.
+        # For over-budget images, header/format/metadata verification above is
+        # deliberately the final check: never call load() just to make a
+        # rejected device conversion retain its original bytes.
+        if width * height > MAX_IMAGE_PIXELS or width * height * 4 > MAX_DECODE_MEMORY_BYTES:
+            return True
+        with Image.open(path) as image:
+            image.load()
+        return True
+    except Exception:
+        return False
+
+
+def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_callback=None, export_metrics=None):
     export_mode = filters.get("export_mode", EXPORT_MODE_ORIGINAL)
     if export_mode not in {EXPORT_MODE_ORIGINAL, EXPORT_MODE_FACE_DEVICE}:
         raise ValidationError("导出模式不正确")
@@ -1491,6 +1528,13 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
     os.close(fd)
     anomalies_total = []
     processed_count = 0
+    metrics = {
+        "processed_students": len(students),
+        "exported_photo_count": 0,
+        "fallback_original_count": 0,
+        "source_unavailable_count": 0,
+        "rejection_reasons": Counter(),
+    }
     # Keep the archive layout stable even when the admin filters to one type.
     # This makes every export self-describing and keeps photos under the
     # corresponding 走读/半走读/住宿 directory.
@@ -1575,6 +1619,7 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
                     category_dir = class_dir if export_layout == "by_study_type" else f"{class_dir}/{safe_filename(study_type)}" if split_study_types else class_dir
                     for student in category_students:
                         student._export_name = ""
+                        student._export_mode = export_mode
                         student._export_status = student.get_match_status_display()
                         photo = _student_photo(student)
                         if student.match_status == "matched" and photo is not None:
@@ -1588,9 +1633,25 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
                                     candidate_name = render_filename(student, rule, used, extension=".jpg")
                             except ExportFileError as exc:
                                 student._export_status = "文件缺失"
+                                metrics["source_unavailable_count"] += 1
+                                metrics["rejection_reasons"]["source_unavailable"] += 1
                                 photo_anomalies.append(("文件缺失", student.name, f"照片无法读取：{photo.file.name}；{exc}"))
                             except DevicePhotoError as exc:
-                                student._export_status = "设备照片失败"
+                                # A staged source has already passed the size/SHA256 check.  If it
+                                # also decodes successfully, every device-side failure (including
+                                # JPEG validation and unsupported-device conversion) must retain the
+                                # original instead of silently dropping the student photo.
+                                if device_mode and staged_photo is not None and _source_is_readable_image(staged_photo):
+                                    fallback_name = render_filename(student, rule, used)
+                                    archive.write(staged_photo, f"{category_dir}/待处理原图/{fallback_name}")
+                                    student._export_name = fallback_name
+                                    student._export_status = "待处理原图"
+                                    metrics["fallback_original_count"] += 1
+                                    metrics["rejection_reasons"][exc.code] += 1
+                                else:
+                                    student._export_status = "源照片不可用"
+                                    metrics["source_unavailable_count"] += 1
+                                    metrics["rejection_reasons"]["source_unavailable"] += 1
                                 photo_anomalies.append(("设备照片失败", student.name, f"{photo.original_name}：{exc.message}"))
                             else:
                                 # Only write a ZIP member after the entire source has been read and verified.
@@ -1598,13 +1659,16 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
                                 # be downgraded to a successful-looking truncated member.
                                 archive.write(device_photo or staged_photo, f"{category_dir}/学生照片/{candidate_name}")
                                 student._export_name = candidate_name
-                                student._export_status = "已导出"
+                                student._export_status = "设备合格" if device_mode else "已导出"
+                                metrics["exported_photo_count"] += 1
                             finally:
                                 if staged_photo is not None:
                                     staged_photo.unlink(missing_ok=True)
                                 if device_photo is not None:
                                     device_photo.unlink(missing_ok=True)
                         else:
+                            metrics["source_unavailable_count"] += 1
+                            metrics["rejection_reasons"]["no_source_photo"] += 1
                             photo_anomalies.append((student.get_match_status_display(), student.name, "没有可导出的已匹配照片"))
                         processed_count += 1
                         if progress_callback:
@@ -1615,6 +1679,9 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
             if len(export_groups) > 1:
                 archive.writestr("总统计表.xlsx", _write_workbook(students, "跨班级导出", anomalies_total))
         _with_db_retry(lambda: AuditLog.objects.create(actor=actor, action="export_students", target_type="Student", detail={"filters": filters, "count": len(students)}, ip_address=ip_address))
+        if export_metrics is not None:
+            export_metrics.update(metrics)
+            export_metrics["rejection_reasons"] = dict(metrics["rejection_reasons"])
         return Path(temp_name), len(students), [getattr(s, "_export_name", "") for s in students[:10]]
     except Exception:
         Path(temp_name).unlink(missing_ok=True)
