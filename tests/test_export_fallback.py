@@ -29,6 +29,13 @@ def _image_bytes(format_name="JPEG"):
     return out.getvalue()
 
 
+def _large_image_bytes(format_name):
+    image = Image.new("RGB", (6001, 4000), (96, 128, 160))
+    out = io.BytesIO()
+    image.save(out, format=format_name)
+    return out.getvalue()
+
+
 def _approved_group():
     year = SchoolYear.objects.create(name="2097")
     group = ClassGroup.objects.create(department="high", school_year=year, grade="高一", name="回退")
@@ -152,6 +159,45 @@ def test_readable_source_falls_back_for_device_output_failures(monkeypatch, sett
     assert metrics["fallback_original_count"] == 1
     assert metrics["source_unavailable_count"] == 0
     assert metrics["rejection_reasons"] == {error_code: 1}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("format_name,extension", [("JPEG", ".jpg"), ("PNG", ".png")])
+def test_over_budget_source_fallback_uses_metadata_without_full_decode(monkeypatch, settings, tmp_path, format_name, extension):
+    settings.MEDIA_ROOT = tmp_path / "media"
+    settings.EXPORT_TEMP_DIR = tmp_path / "exports"
+    year, submission = _approved_group()
+    source_bytes = _large_image_bytes(format_name)
+    student = _student(submission, year, f"超限{format_name}", 1)
+    _photo(student, source_bytes, f"超限{format_name}{extension}")
+
+    def fail_device_budget(source_path, output_dir):
+        raise DevicePhotoError("image_pixel_budget", "图片像素超过设备检测预算")
+
+    load_calls = []
+    original_load = Image.Image.load
+
+    def record_load(image, *args, **kwargs):
+        load_calls.append(image.size)
+        return original_load(image, *args, **kwargs)
+
+    monkeypatch.setattr(services, "prepare_device_photo", fail_device_budget)
+    monkeypatch.setattr(Image.Image, "load", record_load)
+    metrics = {}
+    path, _, _ = export_students_to_tempfile({"export_mode": "face_device"}, export_metrics=metrics)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            assert archive.testzip() is None
+            member = next(name for name in archive.namelist() if "/待处理原图/" in name)
+            assert member.endswith(extension)
+            retained = archive.read(member)
+            assert hashlib.sha256(retained).hexdigest() == hashlib.sha256(source_bytes).hexdigest()
+            assert retained == source_bytes
+    finally:
+        path.unlink(missing_ok=True)
+    assert load_calls == []
+    assert metrics["fallback_original_count"] == 1
+    assert metrics["source_unavailable_count"] == 0
 
 
 @pytest.mark.django_db

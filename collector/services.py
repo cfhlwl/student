@@ -29,7 +29,7 @@ from PIL import Image, UnidentifiedImageError
 from .models import AppSetting, AuditLog, ClassGroup, NamingRule, PhotoSupplement, RESUBMISSION_REASON_CHOICES, ResubmissionNotice, SchoolYear, StagedUpload, Student, StudentPhoto, Submission, SubmissionDocument, SupplementPhoto, UploadBatch, UploadSession
 from .face_export import DevicePhotoError, prepare_device_photo
 from .maintenance import MaintenanceError, collection_maintenance_required, collection_write_gate
-from .photo_quality import PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
+from .photo_quality import MAX_DECODE_MEMORY_BYTES, MAX_IMAGE_PIXELS, PhotoQualityPolicyError, assess_photo_quality, read_face_quality_policy
 from .study_types import STUDY_TYPE_VALUES, normalize_study_type
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".mpo"}
@@ -1486,7 +1486,17 @@ def _source_is_readable_image(path):
     """
     try:
         with Image.open(path) as image:
+            image_format = image.format
+            width, height = image.size
+            if image_format not in ALLOWED_IMAGE_FORMATS or width <= 0 or height <= 0:
+                return False
             image.verify()
+        # The source has already passed the complete staged size/SHA256 check.
+        # For over-budget images, header/format/metadata verification above is
+        # deliberately the final check: never call load() just to make a
+        # rejected device conversion retain its original bytes.
+        if width * height > MAX_IMAGE_PIXELS or width * height * 4 > MAX_DECODE_MEMORY_BYTES:
+            return True
         with Image.open(path) as image:
             image.load()
         return True
