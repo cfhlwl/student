@@ -337,6 +337,10 @@ class ExportJob(models.Model):
     student_count = models.PositiveIntegerField(default=0)
     total_count = models.PositiveIntegerField(default=0)
     processed_count = models.PositiveIntegerField(default=0)
+    exported_photo_count = models.PositiveIntegerField(null=True, blank=True)
+    fallback_original_count = models.PositiveIntegerField(null=True, blank=True)
+    source_unavailable_count = models.PositiveIntegerField(null=True, blank=True)
+    rejection_reasons = models.JSONField(null=True, blank=True)
     preview = models.JSONField(default=list, blank=True)
     error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -353,4 +357,8 @@ class ExportJob(models.Model):
             models.Index(fields=["status", "created_at"], name="export_job_status_created_idx"),
             models.Index(fields=["fingerprint", "status"], name="export_job_fp_status_idx"),
         ]
+
+    @property
+    def has_photo_accounting(self):
+        return self.exported_photo_count is not None
 

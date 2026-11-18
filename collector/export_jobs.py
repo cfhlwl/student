@@ -251,12 +251,14 @@ def process_export_job(job):
     token = job.lease_token
     final_path = Path(settings.EXPORT_TEMP_DIR) / f"export-job-{job.pk}-{token}.zip"
     temp_path = None
+    export_metrics = {}
     try:
         temp_path, count, preview = export_students_to_tempfile(
             job.filters,
             actor=job.requested_by,
             ip_address=job.requested_ip,
             progress_callback=lambda processed, total: _update_export_progress(job, token, processed, total),
+            export_metrics=export_metrics,
         )
         with collection_write_gate():
             current = ExportJob.objects.filter(
@@ -281,6 +283,10 @@ def process_export_job(job):
                 status="completed",
                 file_path=str(final_path),
                 student_count=count,
+                exported_photo_count=export_metrics.get("exported_photo_count"),
+                fallback_original_count=export_metrics.get("fallback_original_count"),
+                source_unavailable_count=export_metrics.get("source_unavailable_count"),
+                rejection_reasons=export_metrics.get("rejection_reasons", {}),
                 preview=preview,
                 completed_at=timezone.now(),
                 expires_at=None,

@@ -12,7 +12,9 @@
     <span id="export-progress-label">{{ job.processed_count }} / {{ job.total_count }} 人</span>
   </div>
   <div id="export-result" hidden>
-    <p>已生成 <strong id="export-count">0</strong> 名学生的资料。</p>
+    <p>任务完成：已处理 <strong id="export-count">0</strong> 人。</p>
+    <p id="export-photo-accounting" class="preview-note" hidden></p>
+    <p id="export-rejection-reasons" class="preview-note" hidden></p>
     <a id="export-download" class="button primary" href="#">下载 ZIP →</a>
     <a class="button ghost" href="{% url 'admin-exports' %}">进入下载菜单</a>
   </div>
@@ -29,6 +31,8 @@
   const text = document.getElementById('export-status-text');
   const result = document.getElementById('export-result');
   const count = document.getElementById('export-count');
+  const accounting = document.getElementById('export-photo-accounting');
+  const rejectionReasons = document.getElementById('export-rejection-reasons');
   const download = document.getElementById('export-download');
   const error = document.getElementById('export-error');
   const progressWrap = document.getElementById('export-progress-wrap');
@@ -48,6 +52,28 @@
       text.textContent = data.status === 'completed' ? '导出已完成，ZIP 已保留在下载菜单中。' : `${data.status_label}，请不要重复点击导出。`;
       if (data.status === 'completed') {
         count.textContent = data.student_count;
+        if (data.photo_accounting_known) {
+          const fallback = data.fallback_original_count || 0;
+          const sourceUnavailable = data.source_unavailable_count || 0;
+          accounting.textContent = data.export_mode === 'face_device'
+            ? `实际输出照片 ${data.exported_photo_count + fallback} 张；设备合格 JPG ${data.exported_photo_count} 张；待处理原图 ${fallback} 张；源照片不可用 ${sourceUnavailable} 张。`
+            : `原始照片输出 ${data.exported_photo_count} 张；源照片不可用 ${sourceUnavailable} 张。`;
+          accounting.hidden = false;
+          const reasonLabels = {
+            face_too_small: '人脸过小', multiple_faces: '多人/多框', detection_timeout: '检测超时',
+            blurry: '清晰度不足', image_pixel_budget: '像素预算超限', overexposed: '过曝',
+            underexposed: '欠曝', occluded_or_side_face: '遮挡或侧脸', profile_face: '明显侧脸',
+            no_face: '未检测到清晰正脸', source_unavailable: '源照片不可用', no_source_photo: '缺少源照片',
+          };
+          const reasonText = Object.entries(data.rejection_reasons || {}).map(([code, value]) => `${reasonLabels[code] || code} ${value} 张`);
+          if (reasonText.length) {
+            rejectionReasons.textContent = `设备处理原因：${reasonText.join('；')}`;
+            rejectionReasons.hidden = false;
+          }
+        } else {
+          accounting.textContent = '历史任务未保存照片统计，无法推断设备合格数量。';
+          accounting.hidden = false;
+        }
         download.href = data.download_url;
         result.hidden = false;
         return;
