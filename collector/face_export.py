@@ -14,7 +14,6 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from functools import lru_cache
 from math import hypot
 from pathlib import Path
 
@@ -55,6 +54,9 @@ DEVICE_DETECTION_BUDGET_SECONDS = 2.0
 DEVICE_DETECTION_SLOT_WAIT_SECONDS = 5.0
 
 _DETECTION_SLOT = threading.BoundedSemaphore(1)
+_YUNET_DETECTION_SLOT = threading.BoundedSemaphore(1)
+_YUNET_MODEL_CACHE_LOCK = threading.Lock()
+_YUNET_MODEL_CACHE: dict[tuple[str, str, float, float], tuple[object, object]] = {}
 
 
 class DevicePhotoError(RuntimeError):
@@ -129,34 +131,43 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-@lru_cache(maxsize=2)
 def _load_yunet_detector(model_path: str, expected_sha256: str, score_threshold: float, nms_threshold: float):
-    path = Path(model_path)
-    if not path.is_file() or path.is_symlink():
-        raise PhotoQualityModelUnavailable(f"YuNet 模型文件缺失：{path.name}")
-    try:
-        actual_sha256 = _sha256_file(path)
-    except OSError as exc:
-        raise PhotoQualityModelUnavailable(f"YuNet 模型文件无法读取：{exc}") from exc
-    if actual_sha256.lower() != expected_sha256.lower():
-        raise PhotoQualityModelUnavailable(
-            f"YuNet 模型 SHA256 不匹配：期望 {expected_sha256}，实际 {actual_sha256}"
-        )
-    try:
-        import cv2
+    key = (str(model_path), expected_sha256.lower(), float(score_threshold), float(nms_threshold))
+    with _YUNET_MODEL_CACHE_LOCK:
+        cached = _YUNET_MODEL_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+        path = Path(model_path)
+        if not path.is_file() or path.is_symlink():
+            raise PhotoQualityModelUnavailable(f"YuNet 模型文件缺失：{path.name}")
         try:
-            cv2.setNumThreads(1)
-        except AttributeError:
-            pass
-        detector = cv2.FaceDetectorYN.create(
-            str(path), "", YUNET_INPUT_SIZE,
-            float(score_threshold), float(nms_threshold), YUNET_TOP_K,
-        )
-        if detector is None:
-            raise RuntimeError("FaceDetectorYN.create 返回空检测器")
-    except Exception as exc:
-        raise PhotoQualityModelUnavailable(f"YuNet 模型加载失败：{exc}") from exc
-    return cv2, detector
+            actual_sha256 = _sha256_file(path)
+        except OSError as exc:
+            raise PhotoQualityModelUnavailable(f"YuNet 模型文件无法读取：{exc}") from exc
+        if actual_sha256.lower() != expected_sha256.lower():
+            raise PhotoQualityModelUnavailable(
+                f"YuNet 模型 SHA256 不匹配：期望 {expected_sha256}，实际 {actual_sha256}"
+            )
+        try:
+            import cv2
+            try:
+                cv2.setNumThreads(1)
+            except AttributeError:
+                pass
+            detector = cv2.FaceDetectorYN.create(
+                str(path), "", YUNET_INPUT_SIZE,
+                float(score_threshold), float(nms_threshold), YUNET_TOP_K,
+            )
+            if detector is None:
+                raise RuntimeError("FaceDetectorYN.create 返回空检测器")
+        except Exception as exc:
+            raise PhotoQualityModelUnavailable(f"YuNet 模型加载失败：{exc}") from exc
+        if len(_YUNET_MODEL_CACHE) >= 2:
+            _YUNET_MODEL_CACHE.pop(next(iter(_YUNET_MODEL_CACHE)))
+        result = (cv2, detector)
+        _YUNET_MODEL_CACHE[key] = result
+        return result
 
 
 def _box_area(box: tuple[int, int, int, int]) -> int:
@@ -329,14 +340,25 @@ def _detect_face_yunet(image: Image.Image) -> tuple[int, int, int, int, float, f
     nms_threshold = float(os.getenv("FACE_YUNET_NMS_THRESHOLD", str(YUNET_NMS_THRESHOLD)))
     try:
         import cv2
-        rgb = np.asarray(image.convert("RGB"))
         if scale != 1.0:
-            rgb = np.asarray(image.resize((detection_width, detection_height), Image.Resampling.LANCZOS).convert("RGB"))
+            detection_image = image.resize((detection_width, detection_height), Image.Resampling.LANCZOS)
+        else:
+            detection_image = image
+        if detection_image.mode != "RGB":
+            detection_image = detection_image.convert("RGB")
+        rgb = np.asarray(detection_image)
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        cv2_module, detector = _load_yunet_detector(model_path, expected_sha256, score_threshold, nms_threshold)
-        detector.setInputSize((detection_width, detection_height))
-        _, raw_detections = detector.detect(bgr)
+        if not _YUNET_DETECTION_SLOT.acquire(timeout=DEVICE_DETECTION_SLOT_WAIT_SECONDS):
+            raise _error("detection_resource_busy", "YuNet 人脸检测资源繁忙，请稍后重试。")
+        try:
+            cv2_module, detector = _load_yunet_detector(model_path, expected_sha256, score_threshold, nms_threshold)
+            detector.setInputSize((detection_width, detection_height))
+            _, raw_detections = detector.detect(bgr)
+        finally:
+            _YUNET_DETECTION_SLOT.release()
+    except DevicePhotoError:
+        raise
     except PhotoQualityModelUnavailable as exc:
         raise _error("model_unavailable", str(exc)) from exc
     except Exception as exc:
