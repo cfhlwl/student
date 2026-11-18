@@ -10,7 +10,8 @@ import tempfile
 import time
 import zipfile
 from functools import wraps
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -1367,7 +1368,7 @@ def send_resubmission_notice(*, submission_id, reason_code, reason, actor, ip_ad
     return _with_db_retry(operation)
 
 
-def render_filename(student, rule, used, extension=None):
+def render_filename(student, rule, used, extension=None, photo=None):
     gender_code = ""
     if student.gender == "男":
         gender_code = rule.male_code
@@ -1385,7 +1386,8 @@ def render_filename(student, rule, used, extension=None):
     for token, value in values.items():
         base = base.replace(token, safe_filename(value, fallback=""))
     base = base or safe_filename(student.name)
-    source_suffix = extension or PurePosixPath(student.photo.original_name).suffix.lower() or ".jpg"
+    source_photo = photo or student.photo
+    source_suffix = extension or PurePosixPath(source_photo.original_name).suffix.lower() or ".jpg"
     if not source_suffix.startswith("."):
         source_suffix = "." + source_suffix
     candidate = f"{base}{source_suffix}"
@@ -1467,6 +1469,94 @@ def _stage_export_file(file_field, *, expected_size=None, expected_sha256=""):
         raise ExportFileError(str(exc)) from exc
 
 
+def _read_export_file_bytes(source_name, *, expected_size=None, expected_sha256=""):
+    """Read and verify one photo without sharing ORM objects with a worker."""
+    total = 0
+    digest = hashlib.sha256()
+    chunks = []
+    try:
+        with default_storage.open(source_name, "rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                digest.update(chunk)
+                total += len(chunk)
+        if expected_size is not None and total != expected_size:
+            raise ExportFileError(f"文件大小不一致：期望 {expected_size}，实际 {total}")
+        if expected_sha256 and not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+            raise ExportFileError("文件 SHA256 不一致")
+        return b"".join(chunks)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        if isinstance(exc, ExportFileError):
+            raise
+        raise ExportFileError(str(exc)) from exc
+
+
+def _export_original_photo_category_parallel(
+    category_students,
+    photo_by_student,
+    rule,
+    used,
+    category_dir,
+    archive,
+    progress_callback,
+    processed_count,
+    total_count,
+):
+    """Bound photo reads while keeping one ordered ZIP writer in the caller."""
+    plan = []
+    anomalies = []
+    for student in category_students:
+        student._export_name = ""
+        student._export_status = student.get_match_status_display()
+        photo = photo_by_student.get(student.id)
+        if student.match_status == "matched" and photo is not None:
+            plan.append((student, photo.file.name, photo.size, photo.sha256, render_filename(student, rule, used, photo=photo)))
+        else:
+            plan.append((student, None, None, None, None))
+
+    pending = deque()
+    plan_iter = iter(plan)
+    with ThreadPoolExecutor(max_workers=settings.EXPORT_PHOTO_WORKERS) as pool:
+        exhausted = False
+        while pending or not exhausted:
+            while not exhausted and len(pending) < settings.EXPORT_PHOTO_MAX_INFLIGHT:
+                try:
+                    student, source_name, expected_size, expected_sha256, candidate_name = next(plan_iter)
+                except StopIteration:
+                    exhausted = True
+                    break
+                future = None if source_name is None else pool.submit(
+                    _read_export_file_bytes,
+                    source_name,
+                    expected_size=expected_size,
+                    expected_sha256=expected_sha256,
+                )
+                pending.append((student, source_name, candidate_name, future))
+            if not pending:
+                continue
+            student, source_name, candidate_name, future = pending.popleft()
+            if future is None:
+                anomalies.append((student.get_match_status_display(), student.name, "没有可导出的已匹配照片"))
+            else:
+                try:
+                    photo_bytes = future.result()
+                except ExportFileError as exc:
+                    student._export_status = "文件缺失"
+                    anomalies.append(("文件缺失", student.name, f"照片无法读取：{source_name}；{exc}"))
+                else:
+                    # Workers only read/verify bytes. The ZIP has one ordered writer.
+                    archive.writestr(f"{category_dir}/学生照片/{candidate_name}", photo_bytes)
+                    student._export_name = candidate_name
+                    student._export_status = "已导出"
+            processed_count += 1
+            if progress_callback:
+                progress_callback(processed_count, total_count)
+    return processed_count, anomalies
+
+
 def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_callback=None):
     export_mode = filters.get("export_mode", EXPORT_MODE_ORIGINAL)
     if export_mode not in {EXPORT_MODE_ORIGINAL, EXPORT_MODE_FACE_DEVICE}:
@@ -1476,8 +1566,12 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
     for key in ["school_year__name", "department", "grade", "class_name", "gender", "study_type"]:
         if filters.get(key): qs = qs.filter(**{key: filters[key]})
     students = list(qs.order_by("department", "grade", "class_name", "name"))
-    if filters.get("has_photo") == "yes": students = [s for s in students if s.match_status == "matched" and hasattr(s, "photo")]
-    if filters.get("has_photo") == "no": students = [s for s in students if not (s.match_status == "matched" and hasattr(s, "photo"))]
+    photo_by_student = {
+        row.student_id: row
+        for row in StudentPhoto.objects.filter(student_id__in=[student.id for student in students])
+    }
+    if filters.get("has_photo") == "yes": students = [s for s in students if s.match_status == "matched" and s.id in photo_by_student]
+    if filters.get("has_photo") == "no": students = [s for s in students if not (s.match_status == "matched" and s.id in photo_by_student)]
     rule = validate_naming_rule(NamingRule.current())
     export_layout = AppSetting.get_value("export_layout", "by_class")
     if export_layout not in {"by_class", "by_study_type"}:
@@ -1573,10 +1667,25 @@ def export_students_to_tempfile(filters, actor=None, ip_address=None, progress_c
                         continue
                     used, photo_anomalies = set(), []
                     category_dir = class_dir if export_layout == "by_study_type" else f"{class_dir}/{safe_filename(study_type)}" if split_study_types else class_dir
+                    if not device_mode and settings.EXPORT_PHOTO_WORKERS > 1:
+                        processed_count, photo_anomalies = _export_original_photo_category_parallel(
+                            category_students,
+                            photo_by_student,
+                            rule,
+                            used,
+                            category_dir,
+                            archive,
+                            progress_callback,
+                            processed_count,
+                            len(students),
+                        )
+                        archive.writestr(f"{category_dir}/学生统计表.xlsx", _write_workbook(category_students, f"{category_dir}", photo_anomalies + class_file_anomalies))
+                        anomalies_total.extend(photo_anomalies)
+                        continue
                     for student in category_students:
                         student._export_name = ""
                         student._export_status = student.get_match_status_display()
-                        photo = _student_photo(student)
+                        photo = photo_by_student.get(student.id)
                         if student.match_status == "matched" and photo is not None:
                             candidate_name = None if device_mode else render_filename(student, rule, used)
                             staged_photo = None

@@ -585,14 +585,10 @@ def test_export_source_read_failure_has_no_partial_photo_member(settings, tmp_pa
     submission = complete_submission([["导出失败", "男", "高中部", "2026", "高一", "F7", "走读", ""]], [photo_file("导出失败.jpg")])
     admin = User.objects.create(username="r2-f7")
     review_submission_version(submission_id=submission.id, action="approved", actor=admin)
-    original_stage = services._stage_export_file
-
-    def fail_after_first_chunk(file_field, **kwargs):
-        staged = original_stage(file_field, **kwargs)
-        staged.write_bytes(staged.read_bytes()[:1])
-        staged.unlink(missing_ok=True)
+    def fail_after_first_chunk(*args, **kwargs):
         raise services.ExportFileError("模拟源文件在首块后读取失败")
 
+    monkeypatch.setattr(services, "_read_export_file_bytes", fail_after_first_chunk)
     monkeypatch.setattr(services, "_stage_export_file", fail_after_first_chunk)
     temp_path, _, _ = export_students_to_tempfile({"school_year__name": "2026"}, actor=admin)
     try:
