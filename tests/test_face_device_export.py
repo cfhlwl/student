@@ -1,5 +1,8 @@
 import hashlib
 import io
+import shutil
+import threading
+import time
 import zipfile
 
 import cv2
@@ -31,6 +34,53 @@ class DynamicCascade:
         return np.asarray(result, dtype=np.int32)
 
 
+class FakeYuNet:
+    def __init__(self, rows):
+        self.rows = rows
+        self.input_size = None
+
+    def setInputSize(self, size):
+        self.input_size = tuple(size)
+
+    def detect(self, image):
+        return None, np.asarray(self.rows, dtype=np.float32)
+
+
+class InterleavingYuNet:
+    def __init__(self):
+        self.input_size = None
+        self._state_lock = threading.Lock()
+        self._set_calls = 0
+        self.second_set = threading.Event()
+        self.active = threading.Event()
+        self.size_errors = []
+        self.overlaps = 0
+
+    def setInputSize(self, size):
+        with self._state_lock:
+            self.input_size = tuple(size)
+            self._set_calls += 1
+            call_number = self._set_calls
+        if call_number == 1:
+            self.second_set.wait(timeout=0.15)
+        else:
+            self.second_set.set()
+
+    def detect(self, image):
+        expected_size = (image.shape[1], image.shape[0])
+        with self._state_lock:
+            if self.input_size != expected_size:
+                self.size_errors.append((self.input_size, expected_size))
+            if self.active.is_set():
+                self.overlaps += 1
+            self.active.set()
+        try:
+            time.sleep(0.03)
+        finally:
+            self.active.clear()
+        return None, np.asarray([yunet_row()], dtype=np.float32)
+
+
 def dynamic_face(image):
     height, width = image.shape[:2]
     return [(width // 3, height // 5, width // 3, height // 2)]
@@ -42,6 +92,28 @@ def fake_models(monkeypatch, *, faces=dynamic_face, profiles=(), eyes=lambda ima
         "_load_classifiers",
         lambda: (cv2, DynamicCascade(faces), DynamicCascade(profiles), DynamicCascade(eyes)),
     )
+
+
+def fake_yunet(monkeypatch, rows):
+    monkeypatch.setenv("FACE_DEVICE_DETECTOR", "yunet")
+    monkeypatch.setattr(
+        face_export,
+        "_load_yunet_detector",
+        lambda *args: (cv2, FakeYuNet(rows)),
+    )
+
+
+def yunet_row(box=(200, 200, 300, 400), *, nose_x=350, score=0.95):
+    x, y, width, height = box
+    return [
+        x, y, width, height,
+        x + width * 0.28, y + height * 0.30,
+        x + width * 0.72, y + height * 0.30,
+        nose_x, y + height * 0.52,
+        x + width * 0.35, y + height * 0.74,
+        x + width * 0.65, y + height * 0.74,
+        score,
+    ]
 
 
 def noisy_jpeg(size=(1600, 2200), *, orientation=None, quality=96):
@@ -100,6 +172,199 @@ def test_device_photo_exif_crop_and_compression(monkeypatch, tmp_path):
         assert image.mode == "RGB"
         assert image.getexif().get(274) in (None, 1)
     assert hashlib.sha256(source.read_bytes()).hexdigest() == source_hash
+
+
+@pytest.mark.django_db
+def test_yunet_adapter_uses_landmarks_and_real_model_contract(monkeypatch, tmp_path):
+    fake_yunet(monkeypatch, [yunet_row()])
+    source = tmp_path / "yunet-single.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    output, metrics = prepare_device_photo(source, tmp_path / "out")
+
+    assert output.is_file()
+    assert metrics.face_width >= 128
+    assert metrics.face_height >= 128
+    assert metrics.face_height / metrics.output_height >= 1 / 3
+
+
+@pytest.mark.django_db
+def test_yunet_same_face_duplicate_boxes_are_deduplicated(monkeypatch, tmp_path):
+    fake_yunet(monkeypatch, [
+        yunet_row(score=0.91),
+        yunet_row((208, 208, 286, 386), nose_x=350, score=0.95),
+    ])
+    source = tmp_path / "yunet-duplicate.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    output, _ = prepare_device_photo(source, tmp_path / "out")
+
+    assert output.is_file()
+
+
+@pytest.mark.django_db
+def test_yunet_partial_overlap_is_multiple_not_deduplicated(monkeypatch, tmp_path):
+    fake_yunet(monkeypatch, [
+        yunet_row((100, 200, 300, 400), nose_x=250, score=0.95),
+        yunet_row((300, 200, 300, 400), nose_x=450, score=0.94),
+    ])
+    source = tmp_path / "yunet-multiple.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    with pytest.raises(DevicePhotoError) as exc_info:
+        prepare_device_photo(source, tmp_path / "out")
+
+    assert exc_info.value.code == "multiple_faces"
+
+
+@pytest.mark.django_db
+def test_yunet_missing_model_is_reported_without_haar_fallback(monkeypatch, tmp_path):
+    monkeypatch.setenv("FACE_DEVICE_DETECTOR", "yunet")
+    monkeypatch.setenv("FACE_YUNET_MODEL_PATH", str(tmp_path / "missing.onnx"))
+    source = tmp_path / "yunet-missing-model.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    with pytest.raises(DevicePhotoError) as exc_info:
+        prepare_device_photo(source, tmp_path / "out")
+
+    assert exc_info.value.code == "model_unavailable"
+
+
+@pytest.mark.django_db
+def test_bundled_yunet_model_loads_without_network(monkeypatch, tmp_path):
+    monkeypatch.setenv("FACE_DEVICE_DETECTOR", "yunet")
+    source = tmp_path / "yunet-blank.jpg"
+    Image.new("RGB", (320, 320), (128, 128, 128)).save(source, format="JPEG")
+
+    with pytest.raises(DevicePhotoError) as exc_info:
+        prepare_device_photo(source, tmp_path / "out")
+
+    assert exc_info.value.code == "no_face"
+
+
+@pytest.mark.django_db
+def test_yunet_invalid_detector_configuration_is_explicit(monkeypatch, tmp_path):
+    monkeypatch.setenv("FACE_DEVICE_DETECTOR", "unknown")
+    source = tmp_path / "yunet-invalid-config.jpg"
+    source.write_bytes(noisy_jpeg())
+
+    with pytest.raises(DevicePhotoError) as exc_info:
+        prepare_device_photo(source, tmp_path / "out")
+
+    assert exc_info.value.code == "detector_config_invalid"
+
+
+@pytest.mark.django_db
+def test_yunet_different_sizes_are_serialized_around_detector_state(monkeypatch, tmp_path):
+    detector = InterleavingYuNet()
+    monkeypatch.setenv("FACE_DEVICE_DETECTOR", "yunet")
+    monkeypatch.setattr(face_export, "_load_yunet_detector", lambda *args: (cv2, detector))
+    sources = []
+    for index, size in enumerate(((1600, 2200), (800, 1200))):
+        source = tmp_path / f"race-{index}.jpg"
+        source.write_bytes(noisy_jpeg(size=size))
+        sources.append(source)
+
+    start = threading.Barrier(2)
+    results = []
+    errors = []
+
+    def worker(source):
+        try:
+            start.wait(timeout=2)
+            results.append(prepare_device_photo(source, tmp_path / "out"))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(source,)) for source in sources]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    assert len(results) == 2
+    assert detector.size_errors == []
+    assert detector.overlaps == 0
+
+
+@pytest.mark.django_db
+def test_yunet_model_cache_initializes_once_for_concurrent_cold_start(monkeypatch, tmp_path):
+    model = tmp_path / "face_detection_yunet_2023mar.onnx"
+    shutil.copyfile(face_export.YUNET_MODEL_DEFAULT_PATH, model)
+    expected_sha256 = hashlib.sha256(model.read_bytes()).hexdigest()
+    face_export._YUNET_MODEL_CACHE.clear()
+    create_calls = 0
+    calls_lock = threading.Lock()
+    real_create = cv2.FaceDetectorYN.create
+
+    def counted_create(*args, **kwargs):
+        nonlocal create_calls
+        with calls_lock:
+            create_calls += 1
+        time.sleep(0.03)
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(cv2.FaceDetectorYN, "create", counted_create)
+    start = threading.Barrier(2)
+    results = []
+    errors = []
+
+    def load_detector():
+        try:
+            start.wait(timeout=2)
+            results.append(face_export._load_yunet_detector(str(model), expected_sha256, 0.70, 0.30))
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=load_detector) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert not errors
+    assert len(results) == 2
+    assert create_calls == 1
+    assert results[0][1] is results[1][1]
+
+
+@pytest.mark.django_db
+def test_yunet_detection_slot_timeout_is_explicit(monkeypatch, tmp_path):
+    fake_yunet(monkeypatch, [yunet_row()])
+    monkeypatch.setattr(face_export, "DEVICE_DETECTION_SLOT_WAIT_SECONDS", 0.01)
+    assert face_export._YUNET_DETECTION_SLOT.acquire(timeout=0.1)
+    source = tmp_path / "busy.jpg"
+    source.write_bytes(noisy_jpeg())
+    try:
+        with pytest.raises(DevicePhotoError) as exc_info:
+            prepare_device_photo(source, tmp_path / "out")
+    finally:
+        face_export._YUNET_DETECTION_SLOT.release()
+    assert exc_info.value.code == "detection_resource_busy"
+
+
+@pytest.mark.django_db
+def test_yunet_detection_builds_only_scaled_numpy_rgb(monkeypatch, tmp_path):
+    fake_yunet(monkeypatch, [yunet_row(box=(180, 240, 180, 240), nose_x=270)])
+    pixels = np.random.default_rng(11).integers(40, 216, (3000, 4000, 3), dtype=np.uint8)
+    image = Image.fromarray(pixels, "RGB")
+    original_asarray = face_export.np.asarray
+    observed_shapes = []
+
+    def tracking_asarray(value, *args, **kwargs):
+        result = original_asarray(value, *args, **kwargs)
+        if result.ndim >= 2:
+            observed_shapes.append(result.shape)
+        return result
+
+    monkeypatch.setattr(face_export.np, "asarray", tracking_asarray)
+    face_export._detect_face_yunet(image)
+
+    assert (3000, 4000, 3) not in observed_shapes
+    assert any(shape[0] <= face_export.YUNET_MAX_DETECTION_DIMENSION for shape in observed_shapes if len(shape) == 3)
 
 
 @pytest.mark.django_db
@@ -259,6 +524,13 @@ def test_device_export_isolated_fingerprint_and_jpg_collision_protection(monkeyp
     original_fp, _ = build_export_fingerprint({})
     device_fp, _ = build_export_fingerprint({"export_mode": "face_device"})
     assert original_fp != device_fp
+    monkeypatch.setenv("FACE_DEVICE_DETECTOR", "yunet")
+    yunet_fp, _ = build_export_fingerprint({"export_mode": "face_device"})
+    assert yunet_fp != device_fp
+    monkeypatch.setenv("FACE_YUNET_MODEL_SHA256", "0" * 64)
+    changed_model_fp, _ = build_export_fingerprint({"export_mode": "face_device"})
+    assert changed_model_fp != yunet_fp
+    monkeypatch.setenv("FACE_DEVICE_DETECTOR", "haar")
 
     path, count, _ = export_students_to_tempfile({"export_mode": "face_device"})
     try:

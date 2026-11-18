@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from .maintenance import MaintenanceError, collection_write_gate
 from .models import AppSetting, ExportJob, NamingRule, Student, StudentPhoto, Submission, SubmissionDocument
-from .face_export import DEVICE_EXPORT_PROFILE_VERSION, DEVICE_MAX_BYTES, DEVICE_FACE_HEIGHT_RATIO, DEVICE_FACE_MIN_PIXELS
+from .face_export import device_export_profile
 from .services import EXPORT_MODE_FACE_DEVICE, EXPORT_MODE_ORIGINAL, export_students_to_tempfile, validate_naming_rule
 
 
@@ -154,12 +154,7 @@ def build_export_fingerprint(filters, snapshot=None):
     snapshot = snapshot or build_export_snapshot(filters)
     options = _export_options()
     if filters.get("export_mode") == EXPORT_MODE_FACE_DEVICE:
-        options["device_profile"] = {
-            "version": DEVICE_EXPORT_PROFILE_VERSION,
-            "max_bytes": DEVICE_MAX_BYTES,
-            "min_face_pixels": DEVICE_FACE_MIN_PIXELS,
-            "min_face_height_ratio": DEVICE_FACE_HEIGHT_RATIO,
-        }
+        options["device_profile"] = device_export_profile()
     payload = {"filters": filters, "options": options, "data_snapshot": snapshot}
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest(), snapshot
